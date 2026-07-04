@@ -7,11 +7,13 @@ import { apiLimiter } from "./middlewears/ratelimiter.js";
 import compression from "compression";
 import morgan from "morgan";
 import requestId from "express-request-id";
+import httpLogger from "./logger/httpLogger.js";
 
 export const app = express();
 app.use(express.json({ extended: true, limit: "20kb" }));
 app.use(express.urlencoded({ extended: true, limit: "20kb" }));
 app.use(compression());
+app.use(httpLogger);
 app.use(morgan("dev"));
 app.use(apiLimiter());
 app.use(requestId());
