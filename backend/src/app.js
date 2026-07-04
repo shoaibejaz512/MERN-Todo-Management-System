@@ -3,11 +3,11 @@ import cors from "cors";
 import dotenv from "dotenv";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
-import { apiLimiter } from "./middlewears/ratelimiter.js";
+import { apiLimiter } from "./middlewears/rate-limiter-flexible-middlewear/apiLimiter.js";
 import compression from "compression";
 import morgan from "morgan";
 import requestId from "express-request-id";
-import httpLogger from "./logger/httpLogger.js";
+import httpLogger from "./loggers/httpLogger.js";
 
 export const app = express();
 app.use(express.json({ extended: true, limit: "20kb" }));
@@ -15,7 +15,7 @@ app.use(express.urlencoded({ extended: true, limit: "20kb" }));
 app.use(compression());
 app.use(httpLogger);
 app.use(morgan("dev"));
-app.use(apiLimiter());
+app.use(apiLimiter);
 app.use(requestId());
 app.use(cookieParser());
 app.use(
