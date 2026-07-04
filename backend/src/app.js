@@ -3,7 +3,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
-import { apiLimiter } from "./middlewears/ratelimiter";
+import { apiLimiter } from "./middlewears/ratelimiter.js";
 
 export const app = express();
 app.use(express.json({ limit: "20kb" }));
