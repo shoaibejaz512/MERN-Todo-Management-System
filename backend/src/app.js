@@ -4,12 +4,17 @@ import dotenv from "dotenv";
 import helmet from "helmet";
 import cookieParser from "cookie-parser";
 import { apiLimiter } from "./middlewears/ratelimiter.js";
+import compression from "compression";
+import morgan from "morgan";
+import requestId from "express-request-id";
 
 export const app = express();
-app.use(express.json({ limit: "20kb" }));
+app.use(express.json({ extended: true, limit: "20kb" }));
 app.use(express.urlencoded({ extended: true, limit: "20kb" }));
-app.use(express.static("public"));
+app.use(compression());
+app.use(morgan("dev"));
 app.use(apiLimiter());
+app.use(requestId());
 app.use(cookieParser());
 app.use(
   cors({

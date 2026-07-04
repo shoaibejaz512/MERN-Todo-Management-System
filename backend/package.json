@@ -11,17 +11,20 @@
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "morgan": "^1.11.0",
     "prettier": "^3.8.4"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
     "cloudinary": "^2.10.0",
     "colorette": "^2.0.20",
+    "compression": "^1.8.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "cross-env": "^10.1.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "express-request-id": "^3.0.0",
     "helmet": "^8.2.0",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.7.2",
