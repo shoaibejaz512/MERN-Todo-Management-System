@@ -18,7 +18,7 @@ const subTodoSchema = new mongoose.Schema(
     status: {
       type: String,
       enum: {
-        values: ["COMPLETED", "PENDING", "ON_GOING", "IN_COMPLETE"],
+        values: ["START","COMPLETED", "PENDING", "ON_GOING", "IN_COMPLETE"],
         message: "the status must be [COMPLETED,PENDING,ON_GOING,IN_COMPLETE]",
       },
     },

@@ -8,7 +8,7 @@ const userSchema = new mongoose.Schema(
       required: [true, "username is required"],
       lowercase: true,
       unique: [true, "username must be lowercase"],
-      trim:true
+      trim: true,
     },
     email: {
       type: String,
@@ -16,18 +16,18 @@ const userSchema = new mongoose.Schema(
       lowercase: true,
       unique: [true, "email must be unique"],
       match: [emailRegex, "Please enter a valid email address"],
-      trim:true
+      trim: true,
     },
     password: {
       type: String,
       required: [true, "password is required"],
       minLength: [3, "minimum length must be 3"],
       maxLength: [30, "maximum length must be 30"],
-      trim:true,
+      trim: true,
     },
-    profileImage:{
-        type:String,
-        trim:true,
+    profileImage: {
+      type: String,
+      trim: true,
     },
     groupTasks: [
       {
@@ -41,6 +41,26 @@ const userSchema = new mongoose.Schema(
         ref: "Todo",
       },
     ],
+    totalGroupTasks: {
+      type: Number,
+      default: 0,
+    },
+    totalSingleTasks: {
+      type: Number,
+      default: 0,
+    },
+    passwordResetToken: {
+      type: String,
+      default: null,
+    },
+    passwordResetTokenExpiration: {
+      type: Date,
+      default: null,
+    },
+    refreshToken: {
+      type: String,
+      default: null,
+    },
   },
   { timestamps: true }
 );
