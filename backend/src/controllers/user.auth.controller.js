@@ -1,3 +1,8 @@
-export const register = async (req, res) => {};
-export const login = async (req, res) => {};
-export const logout = async (req, res) => {};
+import { green } from "colorette";
+
+const registerUser = async (req, res) => {
+};
+const loginUser = async (req, res) => {};
+const logoutUser = async (req, res) => {};
+
+export { registerUser, loginUser, logoutUser };

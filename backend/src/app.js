@@ -27,3 +27,9 @@ app.use(
   })
 );
 app.use(helmet());
+
+
+//routes import
+import userRoute from "./routes/user.routes.js"
+
+app.use("/api/v1/users",userRoute);
