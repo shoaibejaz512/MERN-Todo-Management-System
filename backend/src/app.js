@@ -8,6 +8,8 @@ import compression from "compression";
 import morgan from "morgan";
 import requestId from "express-request-id";
 import httpLogger from "./loggers/httpLogger.js";
+import swaggerUI from "swagger-ui-express";
+import swaggerDocument from "./service/swagger-output.json" with {type:"json"};
 
 export const app = express();
 app.use(express.json({ extended: true, limit: "20kb" }));
@@ -27,9 +29,11 @@ app.use(
   })
 );
 app.use(helmet());
-
+if (process.env.NODE_ENV !== "production") {
+  app.use("/api-docs", swaggerUI.serve, swaggerUI.setup(swaggerDocument));
+}
 
 //routes import
-import userRoute from "./routes/user.routes.js"
+import userRoute from "./routes/user.routes.js";
 
-app.use("/api/v1/users",userRoute);
+app.use("/api/v1/users", userRoute);

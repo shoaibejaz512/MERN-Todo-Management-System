@@ -1,0 +1,57 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "AI Todo Management API",
+    "description": "A secure REST API for an AI-powered Todo Management System built with the MERN Stack. The API provides authentication, task management, AI-assisted productivity features, file uploads, and user profile management.",
+    "version": "1.0.0",
+    "contact": {
+      "name": "Shoaib Ejaz",
+      "email": "shoaibejaz512@gmail.com"
+    }
+  },
+  "basePath": "/",
+  "schemes": [
+    "http"
+  ],
+  "consumes": [
+    "application/json"
+  ],
+  "produces": [
+    "application/json"
+  ],
+  "paths": {
+    "/api/v1/users/register": {
+      "post": {
+        "description": "",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "429": {
+            "description": "Too Many Requests"
+          }
+        }
+      }
+    },
+    "/api/v1/users/login": {
+      "post": {
+        "description": "",
+        "responses": {
+          "429": {
+            "description": "Too Many Requests"
+          }
+        }
+      }
+    },
+    "/api/v1/users/logout": {
+      "post": {
+        "description": "",
+        "responses": {
+          "429": {
+            "description": "Too Many Requests"
+          }
+        }
+      }
+    }
+  }
+}
