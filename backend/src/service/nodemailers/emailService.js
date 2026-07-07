@@ -1,6 +1,6 @@
 // src/services/email/emailService.js
 import { red } from "colorette";
-import { otpTemplate, resetPasswordOtpTemplate } from "./emailTemplates/otpTemplate.email.js";
+import { resetPasswordOtpTemplate } from "./emailTemplates/otpTemplate.email.js";
 import { welcomeTemplate } from "./emailTemplates/welcomeTemplate.email.js";
 import transporter from "../../config/nodemailer.config.js";
 
@@ -43,8 +43,8 @@ function buildMailOptions({ to, subject, html }) {
   };
 }
 
-export async function sendWelcomeEmail(user, verifyUrl) {
-  const html = welcomeTemplate({ name: user.name, verifyUrl });
+export async function sendWelcomeEmail(user) {
+  const html = welcomeTemplate({ name: user.name});
   return sendMailWithRetry(
     buildMailOptions({
       to: user.email,

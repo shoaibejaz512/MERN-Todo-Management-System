@@ -2,6 +2,10 @@
 import nodemailer from "nodemailer";
 import { green, red } from "colorette";
 
+console.log("HOST:", process.env.BREVO_SMTP_HOST);
+console.log("PORT:", process.env.BREVO_SMTP_PORT);
+console.log("USER:", process.env.BREVO_SMTP_USER);
+
 const transporter = nodemailer.createTransport({
   host: process.env.BREVO_SMTP_HOST,
   port: Number(process.env.BREVO_SMTP_PORT),
