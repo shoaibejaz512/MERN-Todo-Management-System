@@ -7,7 +7,7 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: [true, "username is required"],
       lowercase: true,
-      unique: [true, "username must be lowercase"],
+      unique: [true, "name must be unique"],
       trim: true,
     },
     email: {
@@ -22,12 +22,19 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: [true, "password is required"],
       minLength: [3, "minimum length must be 3"],
-      maxLength: [30, "maximum length must be 30"],
+      trim: true,
+    },
+    bio: {
+      type: String,
+      required:true,
       trim: true,
     },
     profileImage: {
       type: String,
       trim: true,
+      default: function () {
+        return `https://api.dicebear.com/9.x/initials/svg?seed=${encodeURIComponent(this.name)}`;
+      },
     },
     groupTasks: [
       {

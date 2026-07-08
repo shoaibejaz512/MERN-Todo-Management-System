@@ -10,11 +10,10 @@ export function signAccessToken(user) {
   });
 }
 
-export function signRefreshToken(userId, family) {
+export function signRefreshToken(user) {
   return jwt.sign(
     {
-      userId: userId.toString(),
-      family,
+      userId: user._id.toString(),
     },
     REFRESH_SECRET,
     {

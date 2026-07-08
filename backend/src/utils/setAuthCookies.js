@@ -5,7 +5,7 @@ export const setAuthCookies = (res, accessToken, refreshToken) => {
 
   res.cookie("accessToken", accessToken, {
     httpOnly: true,
-    secure: isProduction,
+    secure: false,
     sameSite: "strict",
     maxAge: 15 * 60 * 1000, // 15 minutes
   });
