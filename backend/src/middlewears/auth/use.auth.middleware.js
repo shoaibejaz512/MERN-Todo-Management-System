@@ -10,7 +10,7 @@ export const verifyJWT = (req, res, next) => {
     if (!token) {
       return res
         .status(401)
-        .json(new ApiResponse(401, null, "Unauthorized middleweare", false));
+        .json(new ApiResponse(401, null, "Unauthorized", false));
     }
 
     const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET);

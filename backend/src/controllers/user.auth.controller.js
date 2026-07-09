@@ -1,5 +1,8 @@
 import { bgGreen, green, redBright } from "colorette";
-import { sendWelcomeEmail } from "../service/nodemailers/emailService.js";
+import {
+  sendPasswordResetOtp,
+  sendWelcomeEmail,
+} from "../service/nodemailers/emailService.js";
 import ApiResponse from "../utils/apiResponseHandler.js";
 import bcrypt from "bcryptjs";
 import { User } from "../models/user.model.js";
@@ -157,5 +160,105 @@ const logoutUser = async (req, res) => {
       .json(new ApiResponse(500, null, "Internal server error", false));
   }
 };
+const sendPasswordResetOTP = async (req, res) => {
+  try {
+    //STEP:1 FIND USER
+    const user = await User.findById(req.user.userId);
+    //STEP:2 VALIDATE USER
+    if (!user) {
+      return res
+        .status(404)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
 
-export { registerUser, loginUser, logoutUser };
+    //STEP:3 GENERATE OTP
+    const passwordResetOTP = Math.floor(
+      100000 + Math.random() * 900000
+    ).toString();
+    const hashedPasswordResetOTP = await bcrypt.hash(passwordResetOTP, 10);
+    user.passwordResetToken = hashedPasswordResetOTP;
+    user.passwordResetTokenExpires = new Date(Date.now() + 30 * 60 * 1000);
+    await user.save();
+
+    //STEP:4 SEND OTP TO THE USER EMAIL
+    sendPasswordResetOtp(user, passwordResetOTP);
+
+    //STEP:5 SEND DATA TO THE USER JSON
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(200, user.name, "Password reset OTP SEND ON EMAIL", true)
+      );
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
+const verifyPasswordResetOtp = async (req, res) => {
+  const { otp } = req.body;
+  try {
+    //STEP:1 OTP IS GIVEN
+    if (!otp) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "OTP is required", false));
+    }
+    //STEP:2 FIND USER
+    const user = await User.findById(req.user.userId);
+    if (!user) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
+    }
+
+    //STEP:3 CHECK IS OTP IN THE DATABASE OR NOT
+    if (!user.passwordResetToken) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "No password reset OTP found", false));
+    }
+
+    //CHECK THE EXPIRATION DATE OF PASSWORD REST OTP
+    if (
+      !user.passwordResetTokenExpires ||
+      user.passwordResetTokenExpires < Date.now()
+    ) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "OTP has expired", false));
+    }
+
+    //STEP:4 DECODE THE HASHED OTP FROM DATABASE
+    const checkOtp = await bcrypt.compare(otp, user.passwordResetToken);
+    if (!checkOtp) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid OTP", false));
+    }
+
+    //STEP5:CLEAR THE PASSWORD RESET OTP FROM DATABASE
+    user.passwordResetToken = undefined;
+    user.passwordResetTokenExpires = undefined;
+    await user.save();
+
+    //STEP:6 FINALLY RETURN THE SUCCESS RESPONSE TO THE USER
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(200, user.name, "OTP verify successfullly", true)
+      );
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
+
+export {
+  registerUser,
+  loginUser,
+  logoutUser,
+  sendPasswordResetOTP,
+  verifyPasswordResetOtp,
+};

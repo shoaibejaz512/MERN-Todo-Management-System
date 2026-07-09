@@ -26,7 +26,7 @@ const userSchema = new mongoose.Schema(
     },
     bio: {
       type: String,
-      required:true,
+      required: true,
       trim: true,
     },
     profileImage: {
@@ -60,7 +60,7 @@ const userSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
-    passwordResetTokenExpiration: {
+    passwordResetTokenExpires: {
       type: Date,
       default: null,
     },

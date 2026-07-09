@@ -1,4 +1,4 @@
-import registerLimiter from "./registerLimiter.js";
+import registerLimiter from "./register.Limiter.js";
 
 export const registerRateLimit = async (req, res, next) => {
   try {
