@@ -285,13 +285,13 @@ const forgotPassword = async (req, res) => {
         .json(new ApiResponse(403, null, "Please verify your OTP first"));
     }
     //STEP:4 CHECK THE OLDPASSWORD IN DATABASE
-   const isPasswordCorrect = await bcrypt.compare(oldpassword, user.password);
+    const isPasswordCorrect = await bcrypt.compare(oldpassword, user.password);
 
-   if (!isPasswordCorrect) {
-     return res
-       .status(403)
-       .json(new ApiResponse(403, null, "Password is incorrect", false));
-   }
+    if (!isPasswordCorrect) {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, "Password is incorrect", false));
+    }
 
     //STEP:5 HASHED THE NEW PASSWORD AND SET TO THE DATABASE
     const hashedPassword = await bcrypt.hash(newpassword, 12);
@@ -313,6 +313,60 @@ const forgotPassword = async (req, res) => {
   } catch (error) {}
 };
 
+const refreshAccessToken = async (req, res) => {
+  try {
+    const incomingRefreshToken = req.cookies.refreshToken;
+
+    if (!incomingRefreshToken) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Refresh token missing", false));
+    }
+
+    const decoded = jwt.verify(
+      incomingRefreshToken,
+      process.env.REFRESH_TOKEN_SECRET
+    );
+
+    const user = await User.findById(decoded.userId);
+
+    if (!user) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
+    }
+
+    if (incomingRefreshToken !== user.refreshToken) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Invalid refresh token", false));
+    }
+
+    const newAccessToken = signAccessToken(user);
+
+    // Optional (recommended)
+    const newRefreshToken = signRefreshToken(user);
+
+    user.refreshToken = newRefreshToken;
+
+    await user.save();
+
+    setAuthCookies(res, newAccessToken, newRefreshToken);
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(200, null, "Access token refreshed successfully", true)
+      );
+  } catch (error) {
+    return res
+      .status(401)
+      .json(
+        new ApiResponse(401, null, "Refresh token expired or invalid", false)
+      );
+  }
+};
+
 export {
   registerUser,
   loginUser,
@@ -320,4 +374,5 @@ export {
   sendPasswordResetOTP,
   verifyPasswordResetOtp,
   forgotPassword,
+  refreshAccessToken,
 };

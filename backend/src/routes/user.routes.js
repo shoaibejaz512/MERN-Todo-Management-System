@@ -6,6 +6,7 @@ import {
   registerUser,
   verifyPasswordResetOtp,
   forgotPassword,
+  refreshAccessToken,
 } from "../controllers/user.auth.controller.js";
 import { validate } from "../middlewears/validatorsMddleware/validation.middleware.js";
 import { registerSchema } from "../validations/user.validation.js";
@@ -30,5 +31,6 @@ router
   .post(verifyJWT, validate(verifyOtpSchema), verifyPasswordResetOtp);
 
 router.route("/forgot-password").post(verifyJWT, forgotPassword);
+router.route("/refresh").post(verifyJWT, refreshAccessToken);
 
 export default router;
