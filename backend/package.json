@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "nodemon server.js",
-    "swagger": "node ./src/service/swagger.js"
+    "swagger": "node ./src/service/swagger.js",
+    "benchmark": "autocannon http://localhost:5000"
   },
   "keywords": [],
   "author": "",

@@ -187,7 +187,12 @@ const sendPasswordResetOTP = async (req, res) => {
     return res
       .status(200)
       .json(
-        new ApiResponse(200, user.name, "Password reset OTP SEND ON EMAIL", true)
+        new ApiResponse(
+          200,
+          user.name,
+          "Password reset OTP SEND ON EMAIL",
+          true
+        )
       );
   } catch (error) {
     return res
@@ -240,19 +245,72 @@ const verifyPasswordResetOtp = async (req, res) => {
     //STEP5:CLEAR THE PASSWORD RESET OTP FROM DATABASE
     user.passwordResetToken = undefined;
     user.passwordResetTokenExpires = undefined;
+    user.isPasswordResetOtpVerified = true;
     await user.save();
 
     //STEP:6 FINALLY RETURN THE SUCCESS RESPONSE TO THE USER
     return res
       .status(200)
-      .json(
-        new ApiResponse(200, user.name, "OTP verify successfullly", true)
-      );
+      .json(new ApiResponse(200, user.name, "OTP verify successfullly", true));
   } catch (error) {
     return res
       .status(500)
       .json(new ApiResponse(500, null, error.message, false));
   }
+};
+
+const forgotPassword = async (req, res) => {
+  const { oldpassword, newpassword } = req.body;
+  try {
+    //STEP:1 CHECK PASSWORD IS GIVEN
+    if (!oldpassword || !newpassword) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Both fields are required", false));
+    }
+
+    //STE:2 CHECK THE OLDPASSWORD IS IN CORRECT
+    const user = await User.findById(req.user.userId);
+    //STEP:3 CHECK THE USER IS EXIST
+    if (!user) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
+    }
+
+    //CHECK IN THE DATABASE THE isPasswordResetOtpVerified IS TRUE OT NOT
+    if (!user.isPasswordResetOtpVerified) {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, "Please verify your OTP first"));
+    }
+    //STEP:4 CHECK THE OLDPASSWORD IN DATABASE
+   const isPasswordCorrect = await bcrypt.compare(oldpassword, user.password);
+
+   if (!isPasswordCorrect) {
+     return res
+       .status(403)
+       .json(new ApiResponse(403, null, "Password is incorrect", false));
+   }
+
+    //STEP:5 HASHED THE NEW PASSWORD AND SET TO THE DATABASE
+    const hashedPassword = await bcrypt.hash(newpassword, 12);
+    user.password = hashedPassword;
+    user.isPasswordResetOtpVerified = false;
+    await user.save();
+
+    //STEP:7 FIND USER AGAIN FOR SENDING RESPONSE
+    const loggedInUser = await User.findById(req.user.userId).select(
+      "-password -refreshToken"
+    );
+
+    //STEP:6 RETURN SUCCESS RESPONSE TO THE USER
+    return res
+      .status(201)
+      .json(
+        new ApiResponse(201, loggedInUser, "Password Reset Successfully", false)
+      );
+  } catch (error) {}
 };
 
 export {
@@ -261,4 +319,5 @@ export {
   logoutUser,
   sendPasswordResetOTP,
   verifyPasswordResetOtp,
+  forgotPassword,
 };

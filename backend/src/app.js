@@ -37,3 +37,6 @@ if (process.env.NODE_ENV !== "production") {
 import userRoute from "./routes/user.routes.js";
 
 app.use("/api/v1/users", userRoute);
+app.get("/", (req, res) => {
+  res.status(200).send("Server Running");
+});

@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import { emailRegex } from "../constants.js";
+import { boolean } from "zod";
 
 const userSchema = new mongoose.Schema(
   {
@@ -63,6 +64,10 @@ const userSchema = new mongoose.Schema(
     passwordResetTokenExpires: {
       type: Date,
       default: null,
+    },
+    isPasswordResetOtpVerified:{
+      type:boolean,
+      default:false,
     },
     refreshToken: {
       type: String,
