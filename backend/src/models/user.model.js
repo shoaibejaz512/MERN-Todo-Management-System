@@ -8,14 +8,14 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: [true, "username is required"],
       lowercase: true,
-      unique: [true, "name must be unique"],
+      unique: true,
       trim: true,
     },
     email: {
       type: String,
       required: [true, "email is required"],
       lowercase: true,
-      unique: [true, "email must be unique"],
+      unique:true,
       match: [emailRegex, "Please enter a valid email address"],
       trim: true,
     },
@@ -31,10 +31,17 @@ const userSchema = new mongoose.Schema(
       trim: true,
     },
     profileImage: {
-      type: String,
-      trim: true,
-      default: function () {
-        return `https://api.dicebear.com/9.x/initials/svg?seed=${encodeURIComponent(this.name)}`;
+      url: {
+        type: String,
+        default: function () {
+          return `https://api.dicebear.com/9.x/initials/svg?seed=${encodeURIComponent(
+            this.name || "User"
+          )}`;
+        },
+      },
+      publicId: {
+        type: String,
+        default: "",
       },
     },
     groupTasks: [
@@ -65,9 +72,9 @@ const userSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
-    isPasswordResetOtpVerified:{
-      type:boolean,
-      default:false,
+    isPasswordResetOtpVerified: {
+      type: Boolean,
+      default: false,
     },
     refreshToken: {
       type: String,

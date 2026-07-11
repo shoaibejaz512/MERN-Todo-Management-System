@@ -1,4 +1,4 @@
-import { bgGreen, green, redBright } from "colorette";
+import { bgGreen, green, red, redBright } from "colorette";
 import {
   sendPasswordResetOtp,
   sendWelcomeEmail,
@@ -8,6 +8,7 @@ import bcrypt from "bcryptjs";
 import { User } from "../models/user.model.js";
 import { signAccessToken, signRefreshToken } from "../utils/generateTokens.js";
 import { setAuthCookies } from "../utils/setAuthCookies.js";
+import { uploadToCloudinary } from "../utils/fileupload.js";
 
 const registerUser = async (req, res) => {
   //get all the values
@@ -332,8 +333,8 @@ const refreshAccessToken = async (req, res) => {
 
     if (!user) {
       return res
-        .status(404)
-        .json(new ApiResponse(404, null, "User not found", false));
+        .status(400)
+        .json(new ApiResponse(400, null, "User not found", false));
     }
 
     if (incomingRefreshToken !== user.refreshToken) {
@@ -367,6 +368,78 @@ const refreshAccessToken = async (req, res) => {
   }
 };
 
+const updateUserProfile = async (req, res) => {
+  //STEP:1 TAKE DATA FROM THE USER
+  const { name, email, bio } = req.body;
+  try {
+    //STEP:2 VALIDATE FILEDS
+    if (!name || !email || !bio) {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, "All fields are required", false));
+    }
+
+    //SETUP PROFILE IMAGE UPDATE LOGIC
+    let profileImage;
+    if (req.file) {
+      const result = await uploadToCloudinary(req.file.buffer);
+
+      profileImage = {
+        url: result.secure_url,
+        publicId: result.public_id,
+      };
+    }
+
+    //CHECK USER ALREADY EXIST JUST FOR DUPLICATE EMAIL
+    const existingUser = await User.findOne({
+      email,
+      _id: { $ne: req.user.userId },
+    });
+
+    if (existingUser) {
+      return res
+        .status(409)
+        .json(new ApiResponse(409, null, "Email already exists", false));
+    }
+
+    //STEP:3 FIND USER
+    const user = await User.findByIdAndUpdate(
+      req.user.userId,
+      {
+        name,
+        email,
+        bio,
+      },
+      {
+        new: true,
+        runValidators: true,
+      }
+    ).select("-password -refreshToken");
+    //STEP:4 CHECK USER IS EXIST OR NO T
+    if (!user) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
+    }
+
+    //UPDATE THE PROFILE IMAGE IF IS EXIST
+    if (profileImage) {
+      updateData.profileImage = profileImage;
+      await user.save();
+    }
+
+    //STEP:6 RETURN SUCCESS RESPONSE TO THE USER
+    return res
+      .status(201)
+      .json(new ApiResponse(201, user, "Profile update successfully", true));
+  } catch (error) {
+    console.log(red(`Profile update error : ${error.message}`));
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
+
 export {
   registerUser,
   loginUser,
@@ -375,4 +448,5 @@ export {
   verifyPasswordResetOtp,
   forgotPassword,
   refreshAccessToken,
+  updateUserProfile,
 };
