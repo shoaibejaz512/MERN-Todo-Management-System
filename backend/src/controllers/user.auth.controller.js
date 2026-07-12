@@ -517,7 +517,7 @@ const getAllUsers = async (req, res) => {
   }
 };
 
-const getCurrentUser = async (req,res) => {
+const getCurrentUser = async (req, res) => {
   try {
     const userId = req.user.userId;
     //STEP:1 FIND USER BY ID
@@ -525,15 +525,28 @@ const getCurrentUser = async (req,res) => {
       "-password -refreshToken -passwordResetToken -passwordResetTokenExpires"
     );
     //STEP:2 VALIDATE THE USER EXIST OR NOT
-    if(!user){
-      return res.status(404).json(new ApiResponse(404,null,"User not found",false));
+    if (!user) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
     }
     //STEP:3 RETURN SUCCESS RESPONSE TO THE USER
-    return res.status(200).json(new ApiResponse(200,user,"Get current user profile successfully",true));
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          user,
+          "Get current user profile successfully",
+          true
+        )
+      );
   } catch (error) {
-    return res.status(500).json(new ApiResponse(500,null,error.message,false));
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
   }
-}
+};
 
 export {
   registerUser,
