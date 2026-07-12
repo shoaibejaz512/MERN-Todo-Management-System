@@ -482,8 +482,8 @@ const getAllUsers = async (req, res) => {
     const searchQuery = search
       ? {
           $or: [
-            { name: { $regex: search, $options: "i" } },
-            { email: { $regex: search, $options: "i" } },
+            { name: { $text: search, $options: "i" } },
+            { email: { $text: search, $options: "i" } },
           ],
         }
       : {};

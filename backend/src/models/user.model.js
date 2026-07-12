@@ -1,6 +1,5 @@
 import mongoose from "mongoose";
 import { emailRegex } from "../constants.js";
-import { boolean } from "zod";
 
 const userSchema = new mongoose.Schema(
   {
@@ -83,5 +82,8 @@ const userSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+userSchema.index({ name: "text", email: "text" });
+userSchema.index({ createdAt: -1 });
 
 export const User = mongoose.model("User", userSchema);
