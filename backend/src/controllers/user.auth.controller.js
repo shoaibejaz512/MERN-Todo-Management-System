@@ -9,6 +9,7 @@ import { User } from "../models/user.model.js";
 import { signAccessToken, signRefreshToken } from "../utils/generateTokens.js";
 import { setAuthCookies } from "../utils/setAuthCookies.js";
 import { uploadToCloudinary } from "../utils/fileupload.js";
+import jwt from "jsonwebtoken";
 
 const registerUser = async (req, res) => {
   //get all the values
@@ -311,7 +312,11 @@ const forgotPassword = async (req, res) => {
       .json(
         new ApiResponse(201, loggedInUser, "Password Reset Successfully", false)
       );
-  } catch (error) {}
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(400, null, error.message, false));
+  }
 };
 
 const refreshAccessToken = async (req, res) => {
@@ -424,7 +429,7 @@ const updateUserProfile = async (req, res) => {
 
     //UPDATE THE PROFILE IMAGE IF IS EXIST
     if (profileImage) {
-      updateData.profileImage = profileImage;
+      user.profileImage = profileImage;
       await user.save();
     }
 
@@ -440,6 +445,96 @@ const updateUserProfile = async (req, res) => {
   }
 };
 
+const getUserProfile = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user = await User.findById(id).select(
+      "-password -refreshToken -passwordResetToken -passwordResetTokenExpires"
+    );
+
+    if (!user) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
+    }
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(200, user, "User profile fetched successfully", true)
+      );
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
+
+const getAllUsers = async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
+    const search = req.query.search || "";
+
+    // SEARCH KA QUERY BANANA
+    // agar search text diya gaya hai to name ya email mein dhoondo
+    const searchQuery = search
+      ? {
+          $or: [
+            { name: { $regex: search, $options: "i" } },
+            { email: { $regex: search, $options: "i" } },
+          ],
+        }
+      : {};
+
+    const users = await User.find(searchQuery)
+      .select(
+        "-password -refreshToken -passwordResetToken -passwordResetTokenExpires"
+      )
+      .skip(skip)
+      .limit(limit);
+
+    const total = await User.countDocuments(searchQuery);
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          users,
+          total,
+          page,
+          totalPages: Math.ceil(total / limit),
+        },
+        "Users fetched successfully",
+        true
+      )
+    );
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
+
+const getCurrentUser = async (req,res) => {
+  try {
+    const userId = req.user.userId;
+    //STEP:1 FIND USER BY ID
+    const user = await User.findById(userId).select(
+      "-password -refreshToken -passwordResetToken -passwordResetTokenExpires"
+    );
+    //STEP:2 VALIDATE THE USER EXIST OR NOT
+    if(!user){
+      return res.status(404).json(new ApiResponse(404,null,"User not found",false));
+    }
+    //STEP:3 RETURN SUCCESS RESPONSE TO THE USER
+    return res.status(200).json(new ApiResponse(200,user,"Get current user profile successfully",true));
+  } catch (error) {
+    return res.status(500).json(new ApiResponse(500,null,error.message,false));
+  }
+}
+
 export {
   registerUser,
   loginUser,
@@ -449,4 +544,7 @@ export {
   forgotPassword,
   refreshAccessToken,
   updateUserProfile,
+  getAllUsers,
+  getUserProfile,
+  getCurrentUser,
 };

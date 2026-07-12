@@ -8,6 +8,9 @@ import {
   forgotPassword,
   refreshAccessToken,
   updateUserProfile,
+  getAllUsers,
+  getUserProfile,
+  getCurrentUser,
 } from "../controllers/user.auth.controller.js";
 import { validate } from "../middlewears/validatorsMddleware/validation.middleware.js";
 import { registerSchema } from "../validations/user.validation.js";
@@ -34,6 +37,11 @@ router
 
 router.route("/forgot-password").post(verifyJWT, forgotPassword);
 router.route("/refresh-token").post(verifyJWT, refreshAccessToken);
-router.route("/update-profile").patch(upload.single("profileImage"),verifyJWT,updateUserProfile);
+router
+  .route("/update-profile")
+  .patch(verifyJWT, upload.single("profileImage"),updateUserProfile);
+router.route("/").get(verifyJWT,getAllUsers);
+router.route("/me").get(verifyJWT, getCurrentUser);  
+router.route("/:id").get(verifyJWT,getUserProfile);
 
 export default router;
