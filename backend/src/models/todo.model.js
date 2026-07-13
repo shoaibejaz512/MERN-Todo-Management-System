@@ -18,7 +18,26 @@ const todoSchema = new mongoose.Schema(
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
+      required: true,
     },
+    participants: [
+      {
+        user: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          required: true,
+        },
+        role: {
+          type: String,
+          enum: ["owner", "collaborator"],
+          default: "collaborator",
+        },
+        addedAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
     status: {
       type: String,
       enum: {
@@ -26,9 +45,14 @@ const todoSchema = new mongoose.Schema(
         message:
           "the status must be [COMPLETED,START,PENDING,ON_GOING,IN_COMPLETE]",
       },
+      default: "START",
     },
   },
   { timestamps: true }
 );
+
+// Fast lookup: "give me all todos this user is part of"
+todoSchema.index({ "participants.user": 1 });
+todoSchema.index({ createdBy: 1 });
 
 export const Todo = mongoose.model("Todo", todoSchema);
