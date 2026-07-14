@@ -686,6 +686,16 @@ const getCurrentUser = async (req, res) => {
   }
 };
 
+const deleteMyAccount = async (req, res) => {
+  const user = await User.findByIdAndDelete(req.user.userId);
+
+  clearAuthCookies(res);
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, null, "Account deleted successfully", true));
+};
+
 export {
   registerUser,
   loginUser,
@@ -698,4 +708,6 @@ export {
   getAllUsers,
   getUserProfile,
   getCurrentUser,
+  changePassword,
+  deleteMyAccount,
 };

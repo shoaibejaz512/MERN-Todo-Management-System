@@ -11,6 +11,8 @@ import {
   getAllUsers,
   getUserProfile,
   getCurrentUser,
+  changePassword,
+  deleteMyAccount,
 } from "../controllers/user.auth.controller.js";
 import { validate } from "../middlewears/validatorsMddleware/validation.middleware.js";
 import { registerSchema } from "../validations/user.validation.js";
@@ -42,6 +44,7 @@ router
   .route("/update-profile")
   .patch(verifyJWT, upload.single("profileImage"), updateUserProfile);
 router.route("/").get(verifyJWT, getAllUsers);
+router.route("/delete-account").delete(verifyJWT, deleteMyAccount);
 router.route("/me").get(verifyJWT, getCurrentUser);
 router.route("/:id").get(verifyJWT, getUserProfile);
 
