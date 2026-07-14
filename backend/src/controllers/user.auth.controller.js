@@ -48,7 +48,13 @@ const registerUser = async (req, res) => {
     //generate access and refresh token
     const access_token = signAccessToken(user);
     const refres_token = signRefreshToken(user);
-    user.refreshToken = refres_token;
+    user.refreshTokens.push({
+      token: refres_token,
+      userAgent: req.headers["user-agent"],
+      ip: req.ip,
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    });
     await user.save();
 
     //set tokens to cookie
@@ -102,7 +108,13 @@ const loginUser = async (req, res) => {
     //STEP:3 GENERATE TOKENS
     const access_token = signAccessToken(user);
     const refres_token = signRefreshToken(user);
-    user.refreshToken = refres_token;
+    user.refreshTokens.push({
+      token: refres_token,
+      userAgent: req.headers["user-agent"],
+      ip: req.ip,
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    });
     await user.save();
 
     const loggedInUser = await User.findById(user._id).select(
@@ -128,17 +140,16 @@ const loginUser = async (req, res) => {
 };
 const logoutUser = async (req, res) => {
   try {
-    await User.findByIdAndUpdate(
-      req.user.userId,
-      {
-        $unset: {
-          refreshToken: 1,
-        },
-      },
-      {
-        new: true,
-      }
+    await User.findByIdAndUpdate(req.user.userId, {
+      new: true,
+    });
+
+    user.refreshTokens = user.refreshTokens.filter(
+      (session) => session.token !== req.cookies.refreshToken
     );
+
+    await user.save();
+
     res.clearCookie("accessToken", {
       httpOnly: true,
       secure: false,
@@ -170,7 +181,7 @@ const sendPasswordResetOTP = async (req, res) => {
         .status(400)
         .json(new ApiResponse(403, null, "email is required", false));
     //STEP:1 FIND USER
-    const user = await User.findById({ email });
+    const user = await User.findOne({ email });
     //STEP:2 VALIDATE USER
     if (!user) {
       return res
@@ -217,7 +228,7 @@ const verifyPasswordResetOtp = async (req, res) => {
         .json(new ApiResponse(400, null, "OTP is required", false));
     }
     //STEP:2 FIND USER
-    const user = await User.findById({ email });
+    const user = await User.findOne({ email });
     if (!user) {
       return res
         .status(404)
@@ -254,7 +265,6 @@ const verifyPasswordResetOtp = async (req, res) => {
     user.passwordResetTokenExpires = undefined;
     user.isPasswordResetOtpVerified = true;
     await user.save();
-    import jwt from "jsonwebtoken";
 
     // OTP verified...
     const resetToken = jwt.sign(
@@ -337,7 +347,7 @@ const forgotPassword = async (req, res) => {
     user.password = hashedPassword;
 
     // Optional: invalidate all logged-in sessions
-    user.refreshToken = undefined;
+    user.refreshToken = [];
 
     await user.save();
 
@@ -351,19 +361,115 @@ const forgotPassword = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
+
+const changePassword = async (req, res) => {
+  const { oldPassword, newPassword } = req.body;
+
+  try {
+    // STEP 1: Validate input
+    if (!oldPassword || !newPassword) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Old password and new password are required",
+            false
+          )
+        );
+    }
+
+    // STEP 2: Find logged-in user
+    const user = await User.findById(req.user.userId);
+
+    if (!user) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
+    }
+
+    // STEP 3: Verify old password
+    const isOldPasswordCorrect = await bcrypt.compare(
+      oldPassword,
+      user.password
+    );
+
+    if (!isOldPasswordCorrect) {
+      return res
+        .status(401)
+        .json(
+          new ApiResponse(401, null, "Current password is incorrect", false)
+        );
+    }
+
+    // STEP 4: Prevent same password
+    const isSamePassword = await bcrypt.compare(newPassword, user.password);
+
+    if (isSamePassword) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "New password must be different from current password",
+            false
+          )
+        );
+    }
+
+    // STEP 5: Hash new password
+    const hashedPassword = await bcrypt.hash(newPassword, 12);
+
+    user.password = hashedPassword;
+
+    // STEP 6: Logout all devices
+    user.refreshToken = [];
+
+    await user.save();
+
+    // STEP 7: Success response
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          null,
+          "Password changed successfully. Please login again.",
+          true
+        )
+      );
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
+
 const refreshAccessToken = async (req, res) => {
   try {
     const incomingRefreshToken = req.cookies.refreshToken;
 
-    if (!incomingRefreshToken) {
+    const session = user.refreshTokens.find(
+      (session) => session.token === incomingRefreshToken
+    );
+
+    if (!session) {
       return res
         .status(401)
         .json(new ApiResponse(401, null, "Refresh token missing", false));
     }
 
+    session.token = newRefreshToken;
+
+    session.expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+    await user.save();
+
     const decoded = jwt.verify(
       incomingRefreshToken,
-      process.env.REFRESH_TOKEN_SECRET
+      process.env.JWT_REFRESH_SECRET
     );
 
     const user = await User.findById(decoded.userId);
