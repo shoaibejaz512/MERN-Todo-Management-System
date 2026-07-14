@@ -19,7 +19,7 @@ import { verifyOtpSchema } from "../validations/otp.validate.js";
 import { otpRateLimiter } from "../middlewears/rate-limiter-flexible-middlewear/otpRateLimter.js";
 import { loginRateLimit } from "../middlewears/rate-limiter-flexible-middlewear/loginRatelimiter.js";
 import { registerRateLimit } from "../middlewears/rate-limiter-flexible-middlewear/registerRateLimiter.js";
-import upload from "../middlewears/multer/upload.js"
+import upload from "../middlewears/multer/upload.js";
 
 const router = Router();
 
@@ -30,18 +30,18 @@ router.route("/login").post(loginRateLimit, loginUser);
 router.route("/logout").post(verifyJWT, logoutUser);
 router
   .route("/send-password-reset-otp")
-  .post(verifyJWT, otpRateLimiter, sendPasswordResetOTP);
+  .post(otpRateLimiter, sendPasswordResetOTP);
 router
   .route("/verify-password-reset-otp")
-  .post(verifyJWT, validate(verifyOtpSchema), verifyPasswordResetOtp);
+  .post(validate(verifyOtpSchema), verifyPasswordResetOtp);
 
-router.route("/forgot-password").post(verifyJWT, forgotPassword);
+router.route("/forgot-password").post(forgotPassword);
 router.route("/refresh-token").post(verifyJWT, refreshAccessToken);
 router
   .route("/update-profile")
-  .patch(verifyJWT, upload.single("profileImage"),updateUserProfile);
-router.route("/").get(verifyJWT,getAllUsers);
-router.route("/me").get(verifyJWT, getCurrentUser);  
-router.route("/:id").get(verifyJWT,getUserProfile);
+  .patch(verifyJWT, upload.single("profileImage"), updateUserProfile);
+router.route("/").get(verifyJWT, getAllUsers);
+router.route("/me").get(verifyJWT, getCurrentUser);
+router.route("/:id").get(verifyJWT, getUserProfile);
 
 export default router;

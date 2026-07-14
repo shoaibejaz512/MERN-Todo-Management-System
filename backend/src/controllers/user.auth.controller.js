@@ -163,9 +163,14 @@ const logoutUser = async (req, res) => {
   }
 };
 const sendPasswordResetOTP = async (req, res) => {
+  const { email } = req.body;
   try {
+    if (!email)
+      return res
+        .status(400)
+        .json(new ApiResponse(403, null, "email is required", false));
     //STEP:1 FIND USER
-    const user = await User.findById(req.user.userId);
+    const user = await User.findById({ email });
     //STEP:2 VALIDATE USER
     if (!user) {
       return res
@@ -203,7 +208,7 @@ const sendPasswordResetOTP = async (req, res) => {
   }
 };
 const verifyPasswordResetOtp = async (req, res) => {
-  const { otp } = req.body;
+  const { email, otp } = req.body;
   try {
     //STEP:1 OTP IS GIVEN
     if (!otp) {
@@ -212,7 +217,7 @@ const verifyPasswordResetOtp = async (req, res) => {
         .json(new ApiResponse(400, null, "OTP is required", false));
     }
     //STEP:2 FIND USER
-    const user = await User.findById(req.user.userId);
+    const user = await User.findById({ email });
     if (!user) {
       return res
         .status(404)
@@ -249,76 +254,103 @@ const verifyPasswordResetOtp = async (req, res) => {
     user.passwordResetTokenExpires = undefined;
     user.isPasswordResetOtpVerified = true;
     await user.save();
+    import jwt from "jsonwebtoken";
 
-    //STEP:6 FINALLY RETURN THE SUCCESS RESPONSE TO THE USER
-    return res
-      .status(200)
-      .json(new ApiResponse(200, user.name, "OTP verify successfullly", true));
+    // OTP verified...
+    const resetToken = jwt.sign(
+      {
+        userId: user._id,
+        purpose: "password-reset",
+      },
+      process.env.RESET_PASSWORD_SECRET,
+      {
+        expiresIn: "10m",
+      }
+    );
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          resetToken,
+        },
+        "OTP verified successfully",
+        true
+      )
+    );
   } catch (error) {
     return res
       .status(500)
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-
 const forgotPassword = async (req, res) => {
-  const { oldpassword, newpassword } = req.body;
+  const { resetToken, newPassword } = req.body;
+
   try {
-    //STEP:1 CHECK PASSWORD IS GIVEN
-    if (!oldpassword || !newpassword) {
+    // STEP 1
+    if (!resetToken || !newPassword) {
       return res
         .status(400)
-        .json(new ApiResponse(400, null, "Both fields are required", false));
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Reset token and new password are required",
+            false
+          )
+        );
     }
 
-    //STE:2 CHECK THE OLDPASSWORD IS IN CORRECT
-    const user = await User.findById(req.user.userId);
-    //STEP:3 CHECK THE USER IS EXIST
+    // STEP 2
+    let decoded;
+
+    try {
+      decoded = jwt.verify(resetToken, process.env.RESET_PASSWORD_SECRET);
+    } catch (error) {
+      return res
+        .status(401)
+        .json(
+          new ApiResponse(401, null, "Reset token expired or invalid", false)
+        );
+    }
+
+    // STEP 3
+    if (decoded.purpose !== "password-reset") {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Invalid reset token", false));
+    }
+
+    // STEP 4
+    const user = await User.findById(decoded.userId);
+
     if (!user) {
       return res
         .status(404)
         .json(new ApiResponse(404, null, "User not found", false));
     }
 
-    //CHECK IN THE DATABASE THE isPasswordResetOtpVerified IS TRUE OT NOT
-    if (!user.isPasswordResetOtpVerified) {
-      return res
-        .status(403)
-        .json(new ApiResponse(403, null, "Please verify your OTP first"));
-    }
-    //STEP:4 CHECK THE OLDPASSWORD IN DATABASE
-    const isPasswordCorrect = await bcrypt.compare(oldpassword, user.password);
+    // STEP 5
+    const hashedPassword = await bcrypt.hash(newPassword, 12);
 
-    if (!isPasswordCorrect) {
-      return res
-        .status(403)
-        .json(new ApiResponse(403, null, "Password is incorrect", false));
-    }
-
-    //STEP:5 HASHED THE NEW PASSWORD AND SET TO THE DATABASE
-    const hashedPassword = await bcrypt.hash(newpassword, 12);
     user.password = hashedPassword;
-    user.isPasswordResetOtpVerified = false;
+
+    // Optional: invalidate all logged-in sessions
+    user.refreshToken = undefined;
+
     await user.save();
 
-    //STEP:7 FIND USER AGAIN FOR SENDING RESPONSE
-    const loggedInUser = await User.findById(req.user.userId).select(
-      "-password -refreshToken"
-    );
-
-    //STEP:6 RETURN SUCCESS RESPONSE TO THE USER
+    // STEP 6
     return res
-      .status(201)
-      .json(
-        new ApiResponse(201, loggedInUser, "Password Reset Successfully", false)
-      );
+      .status(200)
+      .json(new ApiResponse(200, null, "Password changed successfully", true));
   } catch (error) {
     return res
       .status(500)
-      .json(new ApiResponse(400, null, error.message, false));
+      .json(new ApiResponse(500, null, error.message, false));
   }
 };
-
 const refreshAccessToken = async (req, res) => {
   try {
     const incomingRefreshToken = req.cookies.refreshToken;
@@ -482,8 +514,8 @@ const getAllUsers = async (req, res) => {
     const searchQuery = search
       ? {
           $or: [
-            { name: { $text: search, $options: "i" } },
-            { email: { $text: search, $options: "i" } },
+            { name: { $regex: search, $options: "i" } },
+            { email: { $regex: search, $options: "i" } },
           ],
         }
       : {};

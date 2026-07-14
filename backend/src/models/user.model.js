@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import bcryptjs from "bcryptjs";
 import { emailRegex } from "../constants.js";
 
 const userSchema = new mongoose.Schema(
