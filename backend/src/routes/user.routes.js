@@ -38,7 +38,7 @@ router
   .post(validate(verifyOtpSchema), verifyPasswordResetOtp);
 
 router.route("/forgot-password").post(forgotPassword);
-router.route("/change-password").patch(verifyJWT)
+router.route("/change-password").patch(verifyJWT,changePassword);
 router.route("/refresh-token").post(refreshAccessToken);
 router
   .route("/update-profile")

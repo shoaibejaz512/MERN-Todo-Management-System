@@ -222,10 +222,12 @@ const verifyPasswordResetOtp = async (req, res) => {
   const { email, otp } = req.body;
   try {
     //STEP:1 OTP IS GIVEN
-    if (!otp) {
+    if (!otp || !email) {
       return res
         .status(400)
-        .json(new ApiResponse(400, null, "OTP is required", false));
+        .json(
+          new ApiResponse(400, null, "both OTP and email is required", false)
+        );
     }
     //STEP:2 FIND USER
     const user = await User.findOne({ email });
@@ -446,11 +448,33 @@ const changePassword = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-
 const refreshAccessToken = async (req, res) => {
   try {
-    const incomingRefreshToken = req.cookies.refreshToken;
+    // STEP 1: Get refresh token from cookies
+    const incomingRefreshToken = req.cookies?.refreshToken;
 
+    if (!incomingRefreshToken) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Refresh token is required", false));
+    }
+
+    // STEP 2: Verify JWT
+    const decoded = jwt.verify(
+      incomingRefreshToken,
+      process.env.JWT_REFRESH_SECRET
+    );
+
+    // STEP 3: Find user
+    const user = await User.findById(decoded.userId);
+
+    if (!user) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
+    }
+
+    // STEP 4: Find session
     const session = user.refreshTokens.find(
       (session) => session.token === incomingRefreshToken
     );
@@ -458,51 +482,50 @@ const refreshAccessToken = async (req, res) => {
     if (!session) {
       return res
         .status(401)
-        .json(new ApiResponse(401, null, "Refresh token missing", false));
+        .json(new ApiResponse(401, null, "Invalid refresh token", false));
     }
 
-    session.token = newRefreshToken;
+    // STEP 5: Check database expiry
+    if (session.expiresAt < new Date()) {
+      user.refreshTokens = user.refreshTokens.filter(
+        (s) => s.token !== incomingRefreshToken
+      );
 
+      await user.save();
+
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Refresh token expired", false));
+    }
+
+    // STEP 6: Generate new tokens
+    const newAccessToken = signAccessToken(user);
+    const newRefreshToken = signRefreshToken(user);
+
+    // STEP 7: Rotate refresh token
+    session.token = newRefreshToken;
+    session.createdAt = new Date();
     session.expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
     await user.save();
 
-    const decoded = jwt.verify(
-      incomingRefreshToken,
-      process.env.JWT_REFRESH_SECRET
-    );
-
-    const user = await User.findById(decoded.userId);
-
-    if (!user) {
-      return res
-        .status(400)
-        .json(new ApiResponse(400, null, "User not found", false));
-    }
-
-    if (incomingRefreshToken !== user.refreshToken) {
-      return res
-        .status(401)
-        .json(new ApiResponse(401, null, "Invalid refresh token", false));
-    }
-
-    const newAccessToken = signAccessToken(user);
-
-    // Optional (recommended)
-    const newRefreshToken = signRefreshToken(user);
-
-    user.refreshToken = newRefreshToken;
-
-    await user.save();
-
+    // STEP 8: Set cookies
     setAuthCookies(res, newAccessToken, newRefreshToken);
 
-    return res
-      .status(200)
-      .json(
-        new ApiResponse(200, null, "Access token refreshed successfully", true)
-      );
+    // STEP 9: Response
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          accessToken: newAccessToken,
+        },
+        "Access token refreshed successfully",
+        true
+      )
+    );
   } catch (error) {
+    console.error(error);
+
     return res
       .status(401)
       .json(

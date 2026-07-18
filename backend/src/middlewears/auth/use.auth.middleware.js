@@ -5,7 +5,6 @@ import ApiResponse from "../../utils/apiResponseHandler.js";
 export const verifyJWT = (req, res, next) => {
   try {
     const token = req.cookies.accessToken;
-    console.log("cookies token",token)
 
     if (!token) {
       return res

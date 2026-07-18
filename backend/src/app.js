@@ -35,5 +35,7 @@ if (process.env.NODE_ENV !== "production") {
 
 //routes import
 import userRoute from "./routes/user.routes.js";
+import singleTodoRoutes from "./routes/todo.routes.js"
 
 app.use("/api/v1/users", userRoute);
+app.use('/api/v1/todos',singleTodoRoutes)

@@ -5,4 +5,5 @@ export const verifyOtpSchema = z.object({
     .string()
     .length(6, "OTP must be exactly 6 digits")
     .regex(/^\d+$/, "OTP must contain only numbers"),
+    email:z.string()
 });

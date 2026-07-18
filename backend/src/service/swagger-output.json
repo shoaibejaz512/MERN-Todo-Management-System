@@ -25,6 +25,11 @@
         "description": "",
         "parameters": [
           {
+            "name": "user-agent",
+            "in": "header",
+            "type": "string"
+          },
+          {
             "name": "body",
             "in": "body",
             "schema": {
@@ -69,6 +74,11 @@
       "post": {
         "description": "",
         "parameters": [
+          {
+            "name": "user-agent",
+            "in": "header",
+            "type": "string"
+          },
           {
             "name": "body",
             "in": "body",
@@ -129,12 +139,26 @@
     "/api/v1/users/send-password-reset-otp": {
       "post": {
         "description": "",
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "email": {
+                  "example": "any"
+                }
+              }
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "OK"
           },
-          "401": {
-            "description": "Unauthorized"
+          "400": {
+            "description": "Bad Request"
           },
           "404": {
             "description": "Not Found"
@@ -158,6 +182,9 @@
             "schema": {
               "type": "object",
               "properties": {
+                "email": {
+                  "example": "any"
+                },
                 "otp": {
                   "example": "any"
                 }
@@ -171,9 +198,6 @@
           },
           "400": {
             "description": "Bad Request"
-          },
-          "401": {
-            "description": "Unauthorized"
           },
           "404": {
             "description": "Not Found"
@@ -197,10 +221,10 @@
             "schema": {
               "type": "object",
               "properties": {
-                "oldpassword": {
+                "resetToken": {
                   "example": "any"
                 },
-                "newpassword": {
+                "newPassword": {
                   "example": "any"
                 }
               }
@@ -208,8 +232,8 @@
           }
         ],
         "responses": {
-          "201": {
-            "description": "Created"
+          "200": {
+            "description": "OK"
           },
           "400": {
             "description": "Bad Request"
@@ -217,8 +241,47 @@
           "401": {
             "description": "Unauthorized"
           },
-          "403": {
-            "description": "Forbidden"
+          "404": {
+            "description": "Not Found"
+          },
+          "429": {
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/v1/users/change-password": {
+      "patch": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "oldPassword": {
+                  "example": "any"
+                },
+                "newPassword": {
+                  "example": "any"
+                }
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized"
           },
           "404": {
             "description": "Not Found"
@@ -239,11 +302,11 @@
           "200": {
             "description": "OK"
           },
-          "400": {
-            "description": "Bad Request"
-          },
           "401": {
             "description": "Unauthorized"
+          },
+          "404": {
+            "description": "Not Found"
           },
           "429": {
             "description": "Too Many Requests"
@@ -335,6 +398,22 @@
         }
       }
     },
+    "/api/v1/users/delete-account": {
+      "delete": {
+        "description": "",
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "429": {
+            "description": "Too Many Requests"
+          }
+        }
+      }
+    },
     "/api/v1/users/me": {
       "get": {
         "description": "",
@@ -377,6 +456,144 @@
           },
           "404": {
             "description": "Not Found"
+          },
+          "429": {
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/v1/todos/create-task": {
+      "post": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "example": "any"
+                },
+                "description": {
+                  "example": "any"
+                },
+                "priority": {
+                  "example": "any"
+                },
+                "estimatedHours": {
+                  "example": "any"
+                },
+                "deadline": {
+                  "example": "any"
+                },
+                "tags": {
+                  "example": "any"
+                }
+              }
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "429": {
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/v1/todos/create-task/ai/generate": {
+      "post": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "prompt": {
+                  "example": "any"
+                }
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized"
+          },
+          "429": {
+            "description": "Too Many Requests"
+          },
+          "500": {
+            "description": "Internal Server Error"
+          }
+        }
+      }
+    },
+    "/api/v1/todos/create-task/ai/save": {
+      "post": {
+        "description": "",
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "example": "any"
+                },
+                "description": {
+                  "example": "any"
+                },
+                "priority": {
+                  "example": "any"
+                },
+                "estimatedHours": {
+                  "example": "any"
+                },
+                "deadline": {
+                  "example": "any"
+                },
+                "tags": {
+                  "example": "any"
+                }
+              }
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Created"
+          },
+          "400": {
+            "description": "Bad Request"
+          },
+          "401": {
+            "description": "Unauthorized"
           },
           "429": {
             "description": "Too Many Requests"

@@ -3,37 +3,35 @@ import bcryptjs from "bcryptjs";
 import { emailRegex } from "../constants.js";
 
 
-const refreshTokenSchema = new mongoose.Schema({
-  refreshTokens: [
-    {
-      token: {
-        type: String,
-        required: true,
-      },
-      device: {
-        type: String,
-        default: "Unknown Device",
-      },
-      ip: {
-        type: String,
-        default: "",
-      },
-      userAgent: {
-        type: String,
-        default: "",
-      },
-      createdAt: {
-        type: Date,
-        default: Date.now,
-      },
-      expiresAt: {
-        type: Date,
-        required: true,
-      },
+const refreshTokenSchema = new mongoose.Schema(
+  {
+    token: {
+      type: String,
+      required: true,
     },
-  ],
-});
-
+    device: {
+      type: String,
+      default: "Unknown Device",
+    },
+    ip: {
+      type: String,
+      default: "",
+    },
+    userAgent: {
+      type: String,
+      default: "",
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now,
+    },
+    expiresAt: {
+      type: Date,
+      required: true,
+    },
+  },
+  { _id: false }
+);
 const userSchema = new mongoose.Schema(
   {
     name: {
@@ -47,7 +45,7 @@ const userSchema = new mongoose.Schema(
       type: String,
       required: [true, "email is required"],
       lowercase: true,
-      unique:true,
+      unique: true,
       match: [emailRegex, "Please enter a valid email address"],
       trim: true,
     },
@@ -108,7 +106,7 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-    refreshToken: refreshTokenSchema,
+    refreshTokens: [refreshTokenSchema],
   },
   { timestamps: true }
 );
