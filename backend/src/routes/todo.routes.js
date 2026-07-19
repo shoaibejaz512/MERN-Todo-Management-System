@@ -11,6 +11,8 @@ import {
   deleteTask,
   getTask,
   getAllTasks,
+  restoreArchiveTask,
+  restoreDeletedTask,
 } from "../controllers/soloTodo.controller.js";
 import { aiRateLimit } from "../middlewears/rate-limiter-flexible-middlewear/aiRateLimiter.js";
 
@@ -27,6 +29,8 @@ router.route("/create-task/ai/save").post(verifyJWT, saveAITodo);
 router.route("/update/:id").put(verifyJWT, updateTask);
 router.route("/:id/status").patch(verifyJWT, updateTaskStatus);
 router.route("/delete-task/:id").delete(verifyJWT, deleteTask);
+router.route("/:id/archive").patch(verifyJWT, restoreArchiveTask);
+router.route("/:id/restore").patch(verifyJWT, restoreDeletedTask);
 router.route("/:id").get(verifyJWT, getTask);
 router.route("/").get(verifyJWT, getAllTasks);
 

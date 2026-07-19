@@ -16,13 +16,13 @@ const todoSchema = new mongoose.Schema(
       minlength: [20, "Minimum length must be 20 characters"],
       trim: true,
     },
-    source:{
-      type:String,
+    source: {
+      type: String,
       enum: {
-        values:["manual","ai"],
-        message:"Source must be either manual or ai"
+        values: ["manual", "ai"],
+        message: "Source must be either manual or ai",
+      },
     },
-  },
     priority: {
       type: String,
       enum: {
@@ -37,7 +37,19 @@ const todoSchema = new mongoose.Schema(
       min: [0, "Estimated hours cannot be negative"],
       default: 0,
     },
+    isArchived: {
+      type: Boolean,
+      default: false,
+    },
+    isDeleted: {
+      type: Boolean,
+      default: false,
+    },
 
+    deletedAt: {
+      type: Date,
+      default: null,
+    },
     deadline: {
       type: Date,
       default: null,
