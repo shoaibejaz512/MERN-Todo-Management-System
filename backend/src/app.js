@@ -36,6 +36,10 @@ if (process.env.NODE_ENV !== "production") {
 //routes import
 import userRoute from "./routes/user.routes.js";
 import singleTodoRoutes from "./routes/todo.routes.js"
+import groupTodoRoutes from "./routes/group-todo.routes.js"
+import SubTodoRoutes from "./routes/sub-todo.routes.js";
 
 app.use("/api/v1/users", userRoute);
-app.use('/api/v1/todos',singleTodoRoutes)
+app.use('/api/v1/single-todos',singleTodoRoutes)
+app.use("/api/v1/group-todos", groupTodoRoutes);
+app.use("/api/v1/sub-tasks",SubTodoRoutes);

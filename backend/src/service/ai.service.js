@@ -12,6 +12,14 @@ class TodoAIService {
 
     return todo;
   }
+
+  async generateGroupTodo(userPrompt) {
+    const prompt = groupTodoPrompt(userPrompt);
+
+    return await geminiProvider.generate({
+      prompt,
+    });
+  }
 }
 
 export default new TodoAIService();

@@ -32,6 +32,25 @@ const todoSchema = new mongoose.Schema(
       default: "medium",
     },
 
+    participants: [
+      {
+        user: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: "User",
+          required: true,
+        },
+        role: {
+          type: String,
+          enum: ["owner", "collaborator"],
+          default: "collaborator",
+        },
+        addedAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
+
     estimatedHours: {
       type: Number,
       min: [0, "Estimated hours cannot be negative"],

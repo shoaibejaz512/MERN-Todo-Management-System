@@ -83,7 +83,7 @@ const userSchema = new mongoose.Schema(
     singleTasks: [
       {
         type: mongoose.Schema.Types.ObjectId,
-        ref: "Todo",
+        ref: "SingleTodo",
       },
     ],
     totalGroupTasks: {

@@ -4,22 +4,67 @@ const todoSchema = new mongoose.Schema(
   {
     title: {
       type: String,
-      required: [true, "task title is required"],
-      minLength: [6, "minimum length must be 6"],
-      maxLength: [30, "maximum length must be 30"],
+      required: [true, "Title is required"],
+      minlength: [6, "Minimum length must be 6 characters"],
+      maxlength: [100, "Maximum length must be 100 characters"],
       trim: true,
     },
+
+    description: {
+      type: String,
+      required: [true, "Description is required"],
+      minlength: [20, "Minimum length must be 20 characters"],
+      trim: true,
+    },
+
+    source: {
+      type: String,
+      enum: {
+        values: ["manual", "ai"],
+        message: "Source must be either manual or ai",
+      },
+      default: "manual",
+    },
+
+    priority: {
+      type: String,
+      enum: {
+        values: ["low", "medium", "high"],
+        message: "Priority must be low, medium, or high",
+      },
+      default: "medium",
+    },
+
+    estimatedHours: {
+      type: Number,
+      min: [0, "Estimated hours cannot be negative"],
+      default: 0,
+    },
+
+    deadline: {
+      type: Date,
+      default: null,
+    },
+
+    tags: {
+      type: [String],
+      default: [],
+    },
+
+    // Group specific fields
     SubTodos: [
       {
         type: mongoose.Schema.Types.ObjectId,
         ref: "SubTodo",
       },
     ],
+
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
     },
+
     participants: [
       {
         user: {
@@ -38,21 +83,42 @@ const todoSchema = new mongoose.Schema(
         },
       },
     ],
+
     status: {
       type: String,
       enum: {
         values: ["START", "COMPLETED", "PENDING", "ON_GOING", "IN_COMPLETE"],
         message:
-          "the status must be [COMPLETED,START,PENDING,ON_GOING,IN_COMPLETE]",
+          "Status must be START, COMPLETED, PENDING, ON_GOING, or IN_COMPLETE",
       },
       default: "START",
     },
+
+    isArchived: {
+      type: Boolean,
+      default: false,
+    },
+
+    isDeleted: {
+      type: Boolean,
+      default: false,
+    },
+
+    deletedAt: {
+      type: Date,
+      default: null,
+    },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+  }
 );
 
-// Fast lookup: "give me all todos this user is part of"
-todoSchema.index({ "participants.user": 1 });
+// Indexes
 todoSchema.index({ createdBy: 1 });
+todoSchema.index({ "participants.user": 1 });
+todoSchema.index({ status: 1 });
+todoSchema.index({ isArchived: 1 });
+todoSchema.index({ isDeleted: 1 });
 
 export const Todo = mongoose.model("Todo", todoSchema);
