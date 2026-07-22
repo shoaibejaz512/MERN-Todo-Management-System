@@ -7,10 +7,11 @@ import {
   createGroupTodo,
   deleteGroupTodo,
   archiveGroupTodo,
-  restoreGroupTodo,
+  restoreDeletedGroupTodo,
   saveAIGroupTodo,
   updateGroupTodo,
   updateGroupTodoStatus,
+  restoreArchiveGroupTodo,
 } from "../controllers/groupTodo.controller.js";
 
 const router = Router();
@@ -24,7 +25,8 @@ router.route("/:id").delete(verifyJWT,deleteGroupTodo);
 router.route("/:id").put(verifyJWT, updateGroupTodo);
 router.route("/groups:id/status").patch(verifyJWT, updateGroupTodoStatus);
 router.route("/:id/archive").patch(verifyJWT,archiveGroupTodo);
-router.route("/:id/restore").patch(verifyJWT,restoreGroupTodo);
+router.route("/:id/restore/archive").patch(verifyJWT,restoreArchiveGroupTodo);
+router.route("/:id/restore").patch(verifyJWT, restoreDeletedGroupTodo);
 
 // router.route("/:id").delete(verifyJWT, deletSubTask);
 // router.route("/:id").put(verifyJWT, updateSubTask);

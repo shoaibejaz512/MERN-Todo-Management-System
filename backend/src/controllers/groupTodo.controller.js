@@ -380,6 +380,13 @@ const updateGroupTodoStatus = async (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
 
+    //STEP:1 VALIDE THE ID
+    if (!Mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task ID", false));
+    }
+
     if (!status) {
       return res
         .status(400)
@@ -417,11 +424,224 @@ const updateGroupTodoStatus = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-const deleteGroupTodo = async (req, res) => {};
-const getAllGroupTodos = async (req, res) => {};
-const getGroupTodoById = async (req, res) => {};
-const archiveGroupTodo = async (req, res) => {};
-const restoreGroupTodo = async (req, res) => {};
+const deleteGroupTodo = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    //STEP:1 VALIDE THE ID
+    if (!Mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task ID", false));
+    }
+
+    //STEP:2 FINT THE GROU_TASK IN DATABASE
+    const task = new Todo.findOne({
+      _id: id,
+      createdBy: req.user.userId,
+      isArchived: false,
+      isDeleted: false,
+    });
+
+    //STEP:3 CHECK THE TASK IS GET OR NOT
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    //STEP:4 ASSIGN THIS TASK AS DELETED
+    task.isDeleted = true;
+    task.deletedAt = new Date();
+    await task.save();
+
+    //STEP:5 RETURN SUCCESS MESSAGE
+    return res
+      .status(200)
+      .json(new ApiResponse(200, task, "Task Deleted", true));
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
+const getAllGroupTodos = async (req, res) => {
+  try {
+    //STEP:1 GET ALL GROUP TASKS
+    const tasks = new Todo.find({
+      isDeleted: false,
+      isArchived: false,
+      createdBy: req.user.userId,
+    });
+
+    //STEP:2 CHECK THE TASKS IS GET OR NOT
+    if (!tasks) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Tasks not found"));
+    }
+
+    //STEP:3 RETURN SUCCESS MESSAGE
+    return res
+      .status(200)
+      .json(new ApiResponse(200, tasks, "Tasks get successfully", true));
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
+const getGroupTodoById = async (req, res) => {
+  try {
+    //STEP:1 GET THE DOCUMENT ID FROM PARAMS
+    const { id } = req.params;
+
+    //STEP:2 VALIDATE TEH ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Task ID Invalid", false));
+    }
+
+    //STEP:2 FIND THE PARTICULOR ID
+    const task = new Todo.findById({
+      _id: id,
+      createdBy: req.user.userId,
+      isDeleted: false,
+      isArchived: false,
+    });
+
+    //STEP:2 CHECK THE TASKS IS GET OR NOT
+    if (!tasks) {
+      return res.status(404).json(new ApiResponse(404, null, "Task not found"));
+    }
+
+    //STEP:3 RETURN SUCCESS MESSAGE
+    return res
+      .status(200)
+      .json(new ApiResponse(200, task, "Task get successfully", true));
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
+const archiveGroupTodo = async (req, res) => {
+  try {
+    //STEP:1 GET THE TASK ID
+    const { id } = req.params;
+    //STEP:2 VALIDATE TEH ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Task ID Invalid", false));
+    }
+    //STEP:2 FIND THE PARTICULOR ID
+    const task = new Todo.findOne({
+      _id: id,
+      createdBy: req.user.userId,
+      isDeleted: false,
+      isArchived: false,
+    });
+
+    //STEP:2 CHECK THE TASKS IS GET OR NOT
+    if (!tasks) {
+      return res.status(404).json(new ApiResponse(404, null, "Task not found"));
+    }
+
+    task.isArchived = true;
+    await task.save();
+
+    //STEP:3 RETURN SUCCESS MESSAGE
+    return res
+      .status(200)
+      .json(new ApiResponse(200, task, "Task get successfully", true));
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
+const restoreDeletedGroupTodo = async (req, res) => {
+  try {
+    //STEP:1 GET THE ID FROM PARAMS
+    const { id } = req.params;
+
+    //STEP:2 VALIDATE TEH ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Task ID Invalid", false));
+    }
+
+    //STEP:3 FIND THE DELTED TASK
+    const task = await Todo.findOne({
+      _id: id,
+      createdBy: req.user.userId,
+      isDeleted: true,
+      isArchived: false,
+    });
+
+    //STEP:3 CHECK THE TASKS IS GET OR NOT
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    //STEP:4 UPDATE THE DOCUMENT IN DATABASE
+    task.isDeleted = false;
+    await task.save();
+
+    //STEP:5 RETURN SUCCESS MESSAGE
+    return res
+      .status(200)
+      .json(new ApiResponse(200, task, "Restore Task Success", true));
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
+const restoreArchiveGroupTodo = async (req, res) => {
+  try {
+    //STEP:1 GET THE ID FROM PARAMS
+    const { id } = req.params;
+
+    //STEP:2 VALIDATE TEH ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Task ID Invalid", false));
+    }
+
+    //STEP:3 FIND THE DELTED TASK
+    const task = await Todo.findOne({
+      _id: id,
+      createdBy: req.user.userId,
+      isDeleted: false,
+      isArchived: true,
+    });
+
+    //STEP:3 CHECK THE TASKS IS GET OR NOT
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+    task.isArchived = false;
+    await task.save();
+
+    //STEP:5 RETURN SUCCESS MESSAGE
+    return res
+      .status(200)
+      .json(new ApiResponse(200, task, "Restore Task Success", true));
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
 
 export {
   createGroupTodo,
@@ -432,6 +652,7 @@ export {
   generateAIGroupTodo,
   saveAIGroupTodo,
   archiveGroupTodo,
-  restoreGroupTodo,
+  restoreDeletedGroupTodo,
   updateGroupTodoStatus,
+  restoreArchiveGroupTodo,
 };
