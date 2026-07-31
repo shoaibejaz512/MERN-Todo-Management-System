@@ -760,7 +760,7 @@ const shareGroupTodo = async (req, res) => {
       // all database writes here
 
       //STEP:6 CREATE INVITATION
-       invite = await Invite.create(
+      invite = await Invite.create(
         {
           todo: id,
           invitedBy: req.user.userId,
@@ -771,7 +771,7 @@ const shareGroupTodo = async (req, res) => {
       );
 
       //STEP:7 CREATE NOTIFICATION
-       notification = await Notification.create(
+      notification = await Notification.create(
         {
           user: user._id,
           sender: req.user.userId,
@@ -786,7 +786,7 @@ const shareGroupTodo = async (req, res) => {
       );
 
       //STEP:8 CREATE CHATE MESSAGE
-       message = await Message.create(
+      message = await Message.create(
         {
           sender: req.user.userId,
 
@@ -904,7 +904,44 @@ const shareGroupTodo = async (req, res) => {
     session.endSession();
   }
 };
-const getGroupMembers = async (req, res) => {};
+const getGroupMembers = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    //STEP:1 VALIDATE THE ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(429, null, "Task id invalid", false));
+    }
+
+    //STEP:2 FIND THE TASK
+    const task = await Todo.findOne({
+      _id: id,
+      createdBy: req.user.userId,
+      isDeleted: false,
+      isArchived: false,
+    }).populate({
+      path: "participants.user",
+      select: "name email profileImage",
+    });
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    //STEP:3 RETURN SUCCESS MESSAGE
+    return res
+      .status(200)
+      .json(new ApiResponse(200, task.participants, "Task founded", true));
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
 const updateMemberRole = async (req, res) => {};
 const removeMember = async (req, res) => {};
 const leaveGroupTodo = async (req, res) => {};
