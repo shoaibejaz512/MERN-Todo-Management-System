@@ -2,6 +2,7 @@ import { SingleTodo } from "../models/singleTodo.model.js";
 import ApiResponse from "../utils/apiResponseHandler.js";
 import todoAIService from "../service/ai.service.js";
 import mongoose from "mongoose";
+import { User } from "../models/user.model.js";
 
 // controllers/todo.controller.js
 
@@ -9,6 +10,8 @@ export const createSoloTodo = async (req, res) => {
   try {
     const { title, description, priority, estimatedHours, deadline, tags } =
       req.body;
+
+    console.log(req.body);
 
     if (!title || !description || !deadline) {
       return res
@@ -33,6 +36,14 @@ export const createSoloTodo = async (req, res) => {
       createdBy: req.user.userId,
       source: "manual", // only if you added this field
     });
+
+    //UPDATE THE THE USER MODEL IN DATABASE WITH THE CREATED TODO ID
+    const userId = req.user.userId;
+    const user = await User.findById(userId);
+    if (user) {
+      user.singleTasks.push(todo._id);
+      await user.save();
+    }
 
     return res
       .status(201)
@@ -94,6 +105,14 @@ export const saveAITodo = async (req, res) => {
       createdBy: req.user.userId,
       source: "ai", // only if you added this field
     });
+
+    //UPDATE THE THE USER MODEL IN DATABASE WITH THE CREATED TODO ID
+    const userId = req.user.userId;
+    const user = await User.findById(userId);
+    if (user) {
+      user.singleTasks.push(todo._id);
+      await user.save();
+    }
 
     return res
       .status(201)
@@ -377,6 +396,47 @@ export const restoreDeletedTask = async (req, res) => {
     return res
       .status(200)
       .json(new ApiResponse(200, task, "Deleted Task Restore ", true));
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
+
+export const archiveTask = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // STEP 1: Validate ObjectId
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task ID", false));
+    }
+
+    //STEP:2 FIND TASK BY ID
+    const task = await SingleTodo.findOne({
+      _id: id,
+      createdBy: req.user.userId,
+      isArchived: false,
+      isDeleted: false,
+    });
+
+    //STEP:3 CHECK THE TASK IS FOUND OR NOT
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    //STEP:5 RESTORE THAT TASK
+    task.isArchived = true;
+    await task.save();
+
+    //STEP:6 RETURN SUCCESS MESSAGE TO THE USER
+    return res
+      .status(200)
+      .json(new ApiResponse(200, task, "Task archive successfully", true));
   } catch (error) {
     return res
       .status(500)

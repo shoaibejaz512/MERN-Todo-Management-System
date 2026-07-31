@@ -1,9 +1,12 @@
 import mongoose from "mongoose";
 import ApiResponse from "../utils/apiResponseHandler.js";
-import Todo from "../models/todo.model.js";
+import { Todo } from "../models/todo.model.js";
 import { SubTodo } from "../models/subTodo.model.js";
 import { User } from "../models/user.model.js";
 import todoAIService from "../service/ai.service.js";
+import { Message } from "../models/chat.model.js";
+import { Invite } from "../models/invite.model.js";
+import { io } from "../../server.js";
 
 const createGroupTodo = async (req, res) => {
   const session = await mongoose.startSession();
@@ -643,6 +646,276 @@ const restoreArchiveGroupTodo = async (req, res) => {
   }
 };
 
+const shareGroupTodo = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { id } = req.params;
+    const { email, role } = req.body;
+
+    if (!email) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Email is required", false));
+    }
+
+    //STEP:1 VALIDATE THE ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(409)
+        .json(new ApiResponse(409, null, "Id is not valid", false));
+    }
+
+    //STEP:2 FIND TASK
+    const task = await Todo.findOne({
+      _id: id,
+      isDeleted: false,
+      isArchived: false,
+    }).populate("participants.user", "name email profileImage");
+
+    //STEP:3 CHECK THE TASK IS FOUND OR NOT
+    if (!task) {
+      return res.status(404).json(404, null, "Task not found", false);
+    }
+
+    const participant = task.participants.find(
+      (p) => p.user.toString() === req.user.userId.toString()
+    );
+
+    if (!participant) {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, "Access denied", false));
+    }
+
+    if (participant.role !== "owner") {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, "Access denied", false));
+    }
+
+    //STEP:4 FIND INVITED USERS
+    const user = await User.findOne({
+      email,
+    });
+
+    if (!user) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
+    }
+
+    //CEHCK SELF INVITED NOT ALLOWED
+    if (user._id.equals(req.user.userId)) {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, "Cannot shared yourSelf", false));
+    }
+
+    //STEP:4 CEHCK THE INVITED USER IS FREIND OR NOT
+    const isFriend = await User.exists({
+      _id: req.user.userId,
+      friends: user._id,
+    });
+
+    if (!isFriend) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User is not in freind list", false));
+    }
+
+    //STEP:4 CHECK FREINDS LIST FOR ALREADY MEMBER OF TASK
+    const alreadyMember = task.participants.some(
+      (p) => p.user.toString() === user._id.toString()
+    );
+
+    if (alreadyMember) {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, "User already member", false));
+    }
+
+    //STEP:5 CHECK EXISTING PENDING INVITATION
+    const pendingInvite = await Invite.findOne({
+      todo: id,
+      invitedUser: user._id,
+      status: "PENDING",
+    });
+
+    if (pendingInvite) {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, "Already Invited", false));
+    }
+
+    // ==========================
+    // START TRANSACTION
+    // ==========================
+
+    let invite;
+    let notification;
+    let message;
+
+    await session.withTransaction(async () => {
+      // all database writes here
+
+      //STEP:6 CREATE INVITATION
+       invite = await Invite.create(
+        {
+          todo: id,
+          invitedBy: req.user.userId,
+          invitedUser: user._id,
+          role,
+        },
+        { session }
+      );
+
+      //STEP:7 CREATE NOTIFICATION
+       notification = await Notification.create(
+        {
+          user: user._id,
+          sender: req.user.userId,
+          type: "TASK_INVITE",
+          title: "Task Invitation",
+          message: "send inivitation to joined the task",
+          todo: task._id,
+          invite: invite._id,
+          isRead: false,
+        },
+        { session }
+      );
+
+      //STEP:8 CREATE CHATE MESSAGE
+       message = await Message.create(
+        {
+          sender: req.user.userId,
+
+          type: "TASK_INVITE",
+
+          invite: invite._id,
+
+          todo: id,
+
+          content: `${req.user.name} invited ${user.name} as ${role}`,
+        },
+        { session }
+      );
+    });
+
+    // ==========================
+    // SOCKET EVENTS
+    // Emit AFTER commit
+    // ==========================
+
+    //STEP:9 EMIT NOTIFICATION  SOCKET EVENT
+    io.to(user._id.toString()).emit("notification", {
+      type: "TASK_INVITE",
+
+      notification: {
+        _id: notification._id,
+        title: notification.title,
+        message: notification.message,
+        isRead: notification.isRead,
+        createdAt: notification.createdAt,
+      },
+
+      sender: {
+        _id: req.user.userId,
+        name: req.user.name,
+        profileImage: req.user.profileImage,
+      },
+    });
+
+    //STEP:10 EMIT INVITE SOCKET EVENT
+    io.to(user._id.toString()).emit("invite:new", {
+      invite: {
+        _id: invite._id,
+        role: invite.role,
+        status: invite.status,
+      },
+
+      task: {
+        _id: task._id,
+        title: task.title,
+      },
+
+      sender: {
+        _id: req.user.userId,
+        name: req.user.name,
+        profileImage: req.user.profileImage,
+      },
+    });
+
+    //STEP:11 EMIT MEMBAR  ADDED SOCKET EVENT
+    io.to(task._id.toString()).emit("task:updated", {
+      action: "MEMBER_INVITED",
+
+      taskId: task._id,
+
+      participant: {
+        _id: user._id,
+        name: user.name,
+        email: user.email.trim().toLowerCase(),
+        role: role,
+      },
+
+      invitedBy: {
+        _id: req.user.userId,
+        name: req.user.name,
+      },
+    });
+
+    //STEP:12 EMIT MESSAGE SOCKET EVENT
+    io.to(task._id.toString()).emit("message:new", {
+      message: {
+        _id: message._id,
+        type: message.type,
+        content: message.content,
+        sender: {
+          _id: req.user.userId,
+          name: req.user.name,
+          profileImage: req.user.profileImage,
+        },
+        createdAt: message.createdAt,
+      },
+    });
+
+    //STEP:13 RETURN SUCCESS MESSAGE AND DATA
+    return res.status(201).json(
+      new ApiResponse(
+        201,
+
+        {
+          invite,
+
+          notification,
+        },
+
+        "Invitation sent successfully",
+
+        true
+      )
+    );
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  } finally {
+    session.endSession();
+  }
+};
+const getGroupMembers = async (req, res) => {};
+const updateMemberRole = async (req, res) => {};
+const removeMember = async (req, res) => {};
+const leaveGroupTodo = async (req, res) => {};
+const getPendingGroupInvitation = async (req, res) => {};
+const acceptGroupInvitation = async (req, res) => {};
+const rejectGroupInvitation = async (req, res) => {};
+const cloneGroupTask = async (req, res) => {};
+const commentGroupTaks = async (req, res) => {};
+const getCommentsGroupTasks = async (req, res) => {};
+const updateCommentsGroupTasks = async (req, res) => {};
+
 export {
   createGroupTodo,
   updateGroupTodo,
@@ -655,4 +928,16 @@ export {
   restoreDeletedGroupTodo,
   updateGroupTodoStatus,
   restoreArchiveGroupTodo,
+  shareGroupTodo,
+  getGroupMembers,
+  updateMemberRole,
+  removeMember,
+  leaveGroupTodo,
+  getPendingGroupInvitation,
+  acceptGroupInvitation,
+  rejectGroupInvitation,
+  cloneGroupTask,
+  commentGroupTaks,
+  getCommentsGroupTasks,
+  updateCommentsGroupTasks,
 };

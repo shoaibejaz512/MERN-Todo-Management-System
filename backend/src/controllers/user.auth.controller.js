@@ -140,7 +140,7 @@ const loginUser = async (req, res) => {
 };
 const logoutUser = async (req, res) => {
   try {
-    await User.findByIdAndUpdate(req.user.userId, {
+    const user = await User.findByIdAndUpdate(req.user.userId, {
       new: true,
     });
 

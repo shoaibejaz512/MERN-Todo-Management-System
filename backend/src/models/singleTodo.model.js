@@ -41,8 +41,8 @@ const todoSchema = new mongoose.Schema(
         },
         role: {
           type: String,
-          enum: ["owner", "collaborator"],
-          default: "collaborator",
+          enum: ["viewer", "contributor", "editor"],
+          default: "viewer",
         },
         addedAt: {
           type: Date,

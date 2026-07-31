@@ -6,7 +6,6 @@ const subTodoSchema = new mongoose.Schema(
       type: String,
       required: [true, "title is required"],
       minLength: [6, "minimum length must be 6"],
-      maxLength: [30, "maximum length must be 30"],
       trim: true,
     },
     description: {

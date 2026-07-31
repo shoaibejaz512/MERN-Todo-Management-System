@@ -2,28 +2,39 @@ import mongoose from "mongoose";
 
 const messageSchema = new mongoose.Schema(
   {
-    todo: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Todo",
-      required: true,
-      index: true,
-    },
+    // conversation: {
+    //   type: mongoose.Schema.Types.ObjectId,
+    //   ref: "Conversation",
+    //   required: true,
+    // },
+
     sender: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
     },
+
+    type: {
+      type: String,
+      enum: ["TEXT", "TASK_INVITE", "SYSTEM", "FILE", "IMAGE"],
+      default: "TEXT",
+    },
+
     content: {
       type: String,
-      required: true,
-      trim: true,
-      maxLength: 1000,
+      default: "",
     },
-    messageType: {
-      type: String,
-      enum: ["text", "system"], // "system" auto-messages ke liye, jaise "Ali joined the task"
-      default: "text",
+
+    todo: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Todo",
     },
+
+    invite: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Invite",
+    },
+
     readBy: [
       {
         type: mongoose.Schema.Types.ObjectId,
@@ -31,10 +42,14 @@ const messageSchema = new mongoose.Schema(
       },
     ],
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+  }
 );
 
-// Fast pagination: "get latest messages for this todo"
-messageSchema.index({ todo: 1, createdAt: -1 });
+messageSchema.index({
+  conversation: 1,
+  createdAt: -1,
+});
 
 export const Message = mongoose.model("Message", messageSchema);

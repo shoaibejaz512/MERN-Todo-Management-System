@@ -6,7 +6,6 @@ const todoSchema = new mongoose.Schema(
       type: String,
       required: [true, "Title is required"],
       minlength: [6, "Minimum length must be 6 characters"],
-      maxlength: [100, "Maximum length must be 100 characters"],
       trim: true,
     },
 
@@ -74,8 +73,8 @@ const todoSchema = new mongoose.Schema(
         },
         role: {
           type: String,
-          enum: ["owner", "collaborator"],
-          default: "collaborator",
+          enum: ["viewer", "contributor", "editor", "owner"],
+          default: "owner",
         },
         addedAt: {
           type: Date,
@@ -108,6 +107,12 @@ const todoSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    taskInvitations: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Invite",
+      },
+    ],
   },
   {
     timestamps: true,

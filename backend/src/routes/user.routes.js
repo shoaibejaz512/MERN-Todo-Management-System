@@ -37,12 +37,12 @@ router
   .route("/verify-password-reset-otp")
   .post(validate(verifyOtpSchema), verifyPasswordResetOtp);
 
-router.route("/forgot-password").post(forgotPassword);
-router.route("/change-password").patch(verifyJWT,changePassword);
+router.route("/forgot-password").post(verifyJWT,forgotPassword);
+router.route("/change-password").patch(verifyJWT, changePassword);
 router.route("/refresh-token").post(refreshAccessToken);
 router
   .route("/update-profile")
-  .patch(verifyJWT, upload.single("profileImage"), updateUserProfile);
+  .put(verifyJWT, upload.single("profileImage"), updateUserProfile);
 router.route("/").get(verifyJWT, getAllUsers);
 router.route("/delete-account").delete(verifyJWT, deleteMyAccount);
 router.route("/me").get(verifyJWT, getCurrentUser);
