@@ -40,7 +40,7 @@ router.route("/").get(verifyJWT, getAllGroupTodos);
 router.route("/:id").get(verifyJWT, getGroupTodoById);
 router.route("/:id").delete(verifyJWT, deleteGroupTodo);
 router.route("/:id").put(verifyJWT, updateGroupTodo);
-router.route("/groups:id/status").patch(verifyJWT, updateGroupTodoStatus);
+router.route("/:id/status").patch(verifyJWT, updateGroupTodoStatus);
 router.route("/:id/archive").patch(verifyJWT, archiveGroupTodo);
 router.route("/:id/restore/archive").patch(verifyJWT, restoreArchiveGroupTodo);
 router.route("/:id/restore").patch(verifyJWT, restoreDeletedGroupTodo);

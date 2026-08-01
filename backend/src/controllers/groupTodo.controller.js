@@ -348,7 +348,6 @@ const updateGroupTodo = async (req, res) => {
       isDeleted: false,
       isArchived: false,
     });
-
     //STEP:3 CHECK THE todo IF FIND OR NOT
     if (!todo) {
       return res
@@ -395,22 +394,15 @@ const updateGroupTodoStatus = async (req, res) => {
         .status(400)
         .json(new ApiResponse(400, null, "Status is required", false));
     }
-
-    const todo = await Todo.findOneAndUpdate(
-      {
-        _id: id,
-        createdBy: req.user.userId,
-        isDeleted: false,
-        isArchived: false,
-      },
-      {
-        status,
-      },
-      {
-        new: true,
-        runValidators: true,
-      }
-    );
+    const todo = await Todo.findOne({
+      _id: id,
+      isDeleted: false,
+      isArchived: false,
+      $or: [
+        { createdBy: req.user.userId },
+        { "participants.user": req.user.userId },
+      ],
+    });
 
     if (!todo) {
       return res
@@ -418,6 +410,32 @@ const updateGroupTodoStatus = async (req, res) => {
         .json(new ApiResponse(404, null, "Task not found", false));
     }
 
+    // By default, if the creator is making the request, they are the owner
+    let role = "owner";
+    if (todo.createdBy.toString() !== req.user.userId.toString()) {
+      const member = todo.participants.find(
+        (p) => p.user.toString() === req.user.userId.toString()
+      );
+
+      role = member.role;
+    }
+
+    // Permission check
+    if (!["owner", "editor", "contributor"].includes(role)) {
+      return res
+        .status(403)
+        .json(
+          new ApiResponse(
+            403,
+            null,
+            "You don't have permission to update this task",
+            false
+          )
+        );
+    }
+
+    todo.status = status;
+    await todo.save();
     return res
       .status(200)
       .json(new ApiResponse(200, todo, "Status updated successfully", true));
@@ -942,8 +960,132 @@ const getGroupMembers = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-const updateMemberRole = async (req, res) => {};
-const removeMember = async (req, res) => {};
+const updateMemberRole = async (req, res) => {
+  try {
+    const { id, memberId } = req.params;
+    const { role } = req.body;
+
+    //STEP:1 VALIDATE THE IDS
+    if (
+      !mongoose.Types.ObjectId.isValid(id) ||
+      !mongoose.Types.ObjectId.isValid(memberId)
+    ) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalide ids", false));
+    }
+
+    //STEP:2 FIND THE TASK
+    const task = await Todo.findOne({
+      _id: id,
+      createdBy: req.user.userId,
+      isDeleted: false,
+      isArchived: false,
+    });
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    const member = task.participants.find(
+      (participant) => participant.user.toString() === memberId
+    );
+
+    if (!member) {
+      // Member not found
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Member not found", false));
+    }
+
+    member.role = role;
+
+    await task.save();
+
+    return res
+      .status(200)
+      .json(new ApiResponse(200, task, "Role updated successfully", true));
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
+const removeMember = async (req, res) => {
+  try {
+    const { id, memberId } = req.params;
+
+    //STEP:1 VALIDATE THE IDS
+    if (
+      !mongoose.Types.ObjectId.isValid(id) ||
+      !mongoose.Types.ObjectId.isValid(memberId)
+    ) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalide ids", false));
+    }
+
+    //STEP:2 FIND TASK AND UPDATE THE TASK PARTICIPENT AND PULL THE USER FORM ARRAY
+
+    //STEP:2 FIND THE TASK
+    const task = await Todo.findOne({
+      _id: id,
+      createdBy: req.user.userId,
+      isDeleted: false,
+      isArchived: false,
+    });
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    const member = task.participants.find(
+      (participant) => participant.user.toString() === memberId
+    );
+
+    if (!member) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Not a member of task", false));
+    }
+
+    //STEP:3 CHECK OWNER CANNOT REMOVE FROM TASK
+    if (member.role == "owner") {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "Cannot remove owner from task", false)
+        );
+    }
+
+    const updatedTask = await Todo.findByIdAndUpdate(
+      id,
+      {
+        $pull: {
+          participants: {
+            user: memberId,
+          },
+        },
+      },
+      {
+        new: true,
+      }
+    );
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(200, updatedTask, "Member removed successfully", true)
+      );
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
 const leaveGroupTodo = async (req, res) => {};
 const getPendingGroupInvitation = async (req, res) => {};
 const acceptGroupInvitation = async (req, res) => {};
