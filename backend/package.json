@@ -5,7 +5,8 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "nodemon server.js",
+    "dev": "nodemon server.js",
+    "start": "node server.js",
     "swagger": "node ./src/service/swagger.js",
     "benchmark": "autocannon http://localhost:5000"
   },
