@@ -24,6 +24,7 @@ import {
   commentGroupTaks,
   getCommentsGroupTasks,
   updateCommentsGroupTasks,
+  getPendingTaskInvitations,
 } from "../controllers/groupTodo.controller.js";
 import { authorizeGroupPermission } from "../middlewears/authorizeGroupPermission.js";
 
@@ -61,6 +62,11 @@ router
 
 //get pending invitation
 router.route("/invitations").get(verifyJWT, getPendingGroupInvitation);
+
+//get single task pending invitations
+router
+  .route("/:id/pending-invitations")
+  .get(verifyJWT, getPendingTaskInvitations);
 
 //accept invitation
 router

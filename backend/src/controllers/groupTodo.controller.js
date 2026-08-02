@@ -7,6 +7,7 @@ import todoAIService from "../service/ai.service.js";
 import { Message } from "../models/chat.model.js";
 import { Invite } from "../models/invite.model.js";
 import { io } from "../../server.js";
+import { ta } from "zod/v4/locales";
 
 const createGroupTodo = async (req, res) => {
   const session = await mongoose.startSession();
@@ -663,7 +664,6 @@ const restoreArchiveGroupTodo = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-
 const shareGroupTodo = async (req, res) => {
   const session = await mongoose.startSession();
 
@@ -1086,8 +1086,189 @@ const removeMember = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-const leaveGroupTodo = async (req, res) => {};
-const getPendingGroupInvitation = async (req, res) => {};
+const leaveGroupTodo = async (req, res) => {
+  try {
+    //task id
+    const { id } = req.params;
+
+    //STEP:1 VALIDATE THE ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid id", false));
+    }
+
+    //STEP:2 FIND THE TASK
+    const task = await Todo.findOne({
+      _id: id,
+      isDeleted: false,
+      isArchived: false,
+    });
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    //STEP:2 FIND THE REQUESTED PARTICIPENTS FROM TASK PRTICIPENT
+
+    const member = task.participants.find(
+      (participant) => participant.user.toString() === req.user.userId
+    );
+
+    //check first the req user is the participent or not
+    if (!member) {
+      return res
+        .status(403)
+        .json(
+          new ApiResponse(
+            403,
+            null,
+            "You are not a participant of this group",
+            false
+          )
+        );
+    }
+
+    //STEP:3 OWNER CANNOT LEAVE THE GROUP
+    if (member.role === "owner") {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Access Denied", false));
+    }
+
+    //STEP:4 UPDATE THE TASK AND REMOVE THE MEMBER FROM THE TASK
+    const updatedTask = await Todo.findByIdAndUpdate(
+      id,
+      {
+        $pull: {
+          participants: {
+            user: req.user.userId,
+          },
+        },
+      },
+      {
+        new: true,
+      }
+    );
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(200, updatedTask, "Left the group successfully", true)
+      );
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
+const getPendingGroupInvitation = async (req, res) => {
+  try {
+    const pending_invitations = await Invite.find({
+      invitedUser: req.user.userId,
+      status: "PENDING",
+    });
+    if (pending_invitations.length === 0) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, [], "No pending invitations found", true));
+    }
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          { invitations: pending_invitations },
+          "Pending invitations",
+          true
+        )
+      );
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
+const getPendingTaskInvitations = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    //STEP:1 VALIDATE THE ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Task id invalid", false));
+    }
+
+    //STEP:2 FIDN TASK
+    const task = await Todo.findById(id);
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    const member = task.participants.find(
+      (participant) => participant.user.toString() === req.user.userId
+    );
+
+    if (!member) {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, "Access denied", false));
+    }
+
+    if (member.role !== "owner") {
+      return res
+        .status(403)
+        .json(
+          new ApiResponse(
+            403,
+            null,
+            "Only the owner can view pending invitations",
+            false
+          )
+        );
+    }
+
+    //STEP:3 FIND THE PENDING INVITATIONS FROM INVITE MODEL
+    const pending_invitation = await Invite.find({
+      todo: id,
+      status: "PENDING",
+    });
+
+    if(pending_invitation.length === 0){
+      return res
+        .status(200)
+        .json(
+          new ApiResponse(
+            200,
+            { invitations: pending_invitation },
+            "No Pending invitations you have",
+            true
+          )
+        );
+    }
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          { invitations: pending_invitation },
+          "Pending invitations",
+          true
+        )
+      );
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
 const acceptGroupInvitation = async (req, res) => {};
 const rejectGroupInvitation = async (req, res) => {};
 const cloneGroupTask = async (req, res) => {};
@@ -1119,4 +1300,5 @@ export {
   commentGroupTaks,
   getCommentsGroupTasks,
   updateCommentsGroupTasks,
+  getPendingTaskInvitations,
 };

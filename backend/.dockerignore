@@ -3,6 +3,7 @@ npm-debug.log
 .git
 .gitignore
 Dockerfile
+node_modules
 docker-compose.yml
 .env
 coverage
