@@ -1240,7 +1240,7 @@ const getPendingTaskInvitations = async (req, res) => {
       status: "PENDING",
     });
 
-    if(pending_invitation.length === 0){
+    if (pending_invitation.length === 0) {
       return res
         .status(200)
         .json(
@@ -1269,7 +1269,104 @@ const getPendingTaskInvitations = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-const acceptGroupInvitation = async (req, res) => {};
+const acceptGroupInvitation = async (req, res) => {
+  const session = await mongoose.startSession();
+  try {
+    const { inviteId } = req.params;
+    //STEP:1 VALIDATE THE ID
+    if (!mongoose.Types.ObjectId.isValid(inviteId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid id", false));
+    }
+
+    //STEP:8 PUSH REQ USER INSIDE TASK PARTICIPENT ARRAY INSIDE TODO MODEL
+    let updatedTask;
+
+    await session.withTransaction(async () => {
+      //STEP:2 FIDN THE INVITATION FROM MODEL
+      const invite = await Invite.findOne({
+        _id: inviteId,
+        invitedUser: req.user.userId,
+        isInviteAccepted: false,
+        status: "PENDING",
+      }).session(session);
+      //STEP:3 CHECK INVITE IS FOUND OR NOT
+      if (!invite) {
+        throw new ApiError(404, "invite not found");
+      }
+
+      //STEP:3 FIND THE TASK
+      const task = await Todo.findById(invite.todo).session(session);
+
+      if (!task) {
+        throw new ApiError(404, "Task not found");
+      }
+      if (task.createdBy.toString() === req.user.userId) {
+        throw new ApiError(400, "Owner cannot accept invitation");
+      }
+      updatedTask = await Todo.findOneAndUpdate(
+        {
+          _id: task._id,
+          isDeleted: false,
+          isArchived: false,
+          "participants.user": {
+            $ne: req.user.userId,
+          },
+        },
+        {
+          $push: {
+            participants: {
+              user: req.user.userId,
+              role: invite.role,
+            },
+          },
+        },
+        {
+          new: true,
+          session,
+        }
+      );
+      if (!updatedTask) {
+        throw new ApiError(400, "User is already a participant");
+      }
+
+      await Invite.findByIdAndUpdate(
+        invite._id,
+        {
+          status: "ACCEPTED",
+          isInviteAccepted: true,
+        },
+        {
+          session,
+        }
+      );
+    });
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          updatedTask,
+          "Invitation accepted successfully",
+          true
+        )
+      );
+  } catch (error) {
+    if (error instanceof ApiError) {
+      return res
+        .status(error.statusCode)
+        .json(new ApiResponse(error.statusCode, null, error.message, false));
+    }
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  } finally {
+    session.endSession();
+  }
+};
 const rejectGroupInvitation = async (req, res) => {};
 const cloneGroupTask = async (req, res) => {};
 const commentGroupTaks = async (req, res) => {};

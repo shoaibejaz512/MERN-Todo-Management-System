@@ -31,9 +31,9 @@ const inviteSchema = new mongoose.Schema(
       enum: ["PENDING", "ACCEPTED", "REJECTED"],
       default: "PENDING",
     },
-    isInviteAccepted:{
-      type:Boolean,
-      default:false,
+    isInviteAccepted: {
+      type: Boolean,
+      default: false,
     },
   },
   {
