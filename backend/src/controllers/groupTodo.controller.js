@@ -1344,13 +1344,15 @@ const acceptGroupInvitation = async (req, res) => {
       );
     });
 
+    const user = await User.findById(req.user.userId);
+
     //SEND NOTIFICATION TO THE OWNER
     const notification = await Notification.create({
       user: ownerId, // Receiver (Task Owner)
       sender: req.user.userId, // User who accepted
       type: "TASK_ACCEPTED",
       title: "Invitation Accepted",
-      message: `${req.user.name} accepted your invitation.`,
+      message: `${user.name} accepted your invitation.`,
       todo: updatedTask._id,
       invite: inviteId,
     });
@@ -1391,7 +1393,72 @@ const acceptGroupInvitation = async (req, res) => {
     session.endSession();
   }
 };
-const rejectGroupInvitation = async (req, res) => {};
+const rejectGroupInvitation = async (req, res) => {
+  try {
+    const { inviteId } = req.params;
+
+    //STEP:1 VALIDATE THE ID
+    if (!mongoose.Types.ObjectId.isValid(inviteId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid api", false));
+    }
+
+    //STEP:2 FIND THAT USER WHOS REJECT THE INVITATIOS
+    const user = await User.findById(req.user.userId);
+
+    //STEP:3 VALIDATE THE USER
+    if (!user) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
+    }
+
+    //STEP:4 FIND THE INVITATION FROM INVITE MODEL
+    const invite = await Invite.findOne({
+      _id: inviteId,
+      invitedUser: req.user.userId,
+      status: "PENDING",
+      isInviteAccepted: false,
+    });
+
+    //STEP:5 VALIDATE THE INVITE
+    if (!invite) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Invite not found", false));
+    }
+
+    //STEP:6 UPDATE THE INVITE
+    ((invite.status = "REJECTED"), await invite.save());
+
+    const user = await User.findById(req.user.userId);
+
+    //STEP:8 CREATE NOTIFICATION
+    let ownerId = invite.invitedBy;
+    const notification = await Notification.create({
+      user: ownerId,
+      sender: req.user.userId,
+      type: "TASK_REJECTED",
+      title: "Invitation Rejected",
+      message: `${user.name} reject your invitation.`,
+      todo: invite.todo,
+      invite: inviteId,
+    });
+
+    //STEP:9 EMIT NOTIFIACTION TO THE USER
+   io.to(`user:${ownerId}`).emit("notification:new", notification);
+
+    //STEP:7 RETURN SUCCESS RESPONSE
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(200, invite, "Invitation rejected successfully", true)
+      );
+  } catch (error) {
+    return res.status(500).json(new ApiResponse(500,null,error.message,false));
+  }
+};
 const cloneGroupTask = async (req, res) => {};
 const commentGroupTaks = async (req, res) => {};
 const getCommentsGroupTasks = async (req, res) => {};

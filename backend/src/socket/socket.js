@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import { Todo } from "../models/todo.model.js";
 import { socketAuthMiddleware } from "./middleware/socketAuth.middleware.js";
+import { green } from "colorette";
 
 export const initializeSocket = (io) => {
   io.use(socketAuthMiddleware);
@@ -8,23 +9,27 @@ export const initializeSocket = (io) => {
     console.log(`User Connected: ${socket.id}`);
 
     // Join a task room
-    socket.on("task:join", async ({ taskId, userId }) => {
+    socket.on("task:join", async ({ taskId }) => {
       try {
         if (!mongoose.Types.ObjectId.isValid(taskId)) {
           return socket.emit("socket:error", {
             message: "Invalid task id",
           });
         }
-
         const task = await Todo.findOne({
           _id: taskId,
           isDeleted: false,
           isArchived: false,
-          participants: {
-            $elemMatch: {
-              user: userId,
+          $or: [
+            { createdBy: socket.userId },
+            {
+              participants: {
+                $elemMatch: {
+                  user: socket.userId,
+                },
+              },
             },
-          },
+          ],
         });
 
         if (!task) {
@@ -39,7 +44,7 @@ export const initializeSocket = (io) => {
           taskId,
         });
 
-        console.log(`${userId} joined task:${taskId}`);
+        console.log(green(`${socket.userId} joined task:${taskId}`));
       } catch (error) {
         socket.emit("socket:error", {
           message: error.message,
