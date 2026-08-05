@@ -16,7 +16,14 @@ const notificationSchema = new mongoose.Schema(
     type: {
       type: String,
       enum: [
-        "TASK_INVITE,TASK_ACCEPTED,TASK_REJECTED,TASK_REMOVED,TASK_ROLE_CHANGED,TASK_COMPLETED,COMMENT_ADDED,MENTION",
+        "TASK_INVITE",
+        "TASK_ACCEPTED",
+        "TASK_REJECTED",
+        "TASK_REMOVED",
+        "TASK_ROLE_CHANGED",
+        "TASK_COMPLETED",
+        "COMMENT_ADDED",
+        "MENTION",
       ],
     },
 

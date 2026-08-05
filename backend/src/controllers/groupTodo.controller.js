@@ -1282,6 +1282,7 @@ const acceptGroupInvitation = async (req, res) => {
 
     //STEP:8 PUSH REQ USER INSIDE TASK PARTICIPENT ARRAY INSIDE TODO MODEL
     let updatedTask;
+    let notification;
 
     await session.withTransaction(async () => {
       //STEP:2 FIDN THE INVITATION FROM MODEL
@@ -1343,6 +1344,29 @@ const acceptGroupInvitation = async (req, res) => {
       );
     });
 
+    //SEND NOTIFICATION TO THE OWNER
+    const notification = await Notification.create({
+      user: ownerId, // Receiver (Task Owner)
+      sender: req.user.userId, // User who accepted
+      type: "TASK_ACCEPTED",
+      title: "Invitation Accepted",
+      message: `${req.user.name} accepted your invitation.`,
+      todo: updatedTask._id,
+      invite: inviteId,
+    });
+
+    //EMIT THE NOTIFICATION
+    io.to(ownerId).emit("notification", notification);
+
+    //CREATE TASK ACTIVITY DOCUMENT
+    const activity = await TaskActivity.create({
+      todo: task._id,
+      actor: req.user.userId,
+      targetUser: req.user.userId,
+      type: "MEMBER_JOINED",
+      message: `${user.name} joined the task.`,
+    });
+    io.to(`task:${updatedTask._id}`).emit("task:activity", activity);
     return res
       .status(200)
       .json(
