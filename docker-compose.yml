@@ -1,0 +1,10 @@
+version:'5'
+services:
+  front:
+    build:
+      context:'./frontend'
+      dockerfile:DockerFile
+      ports:
+        - 3000:3000
+      container_name:react-container
+      

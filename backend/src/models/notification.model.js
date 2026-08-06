@@ -16,6 +16,9 @@ const notificationSchema = new mongoose.Schema(
     type: {
       type: String,
       enum: [
+        "TASK_RESTORE",
+        "TASK_UPDATED",
+        "TASK_CREATED",
         "TASK_INVITE",
         "TASK_ACCEPTED",
         "TASK_REJECTED",

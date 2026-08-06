@@ -8,6 +8,7 @@ import { Message } from "../models/chat.model.js";
 import { Invite } from "../models/invite.model.js";
 import { io } from "../../server.js";
 import { ta } from "zod/v4/locales";
+import { Notification } from "../models/notification.model.js";
 
 const createGroupTodo = async (req, res) => {
   const session = await mongoose.startSession();
@@ -134,6 +135,24 @@ const createGroupTodo = async (req, res) => {
 
     // STEP 7: Commit Transaction
     await session.commitTransaction();
+
+    //STEP:8 EMIT SOCKET EVENT FOR TASK CREATED
+    const notification = new Notification.create({
+      user: req.user.userId,
+      sender: req.user.userId,
+      type: "TASK_CREATED",
+      title: "Task Created",
+      message: "You have created a new task",
+      todo: todo._id,
+      isRead: false,
+    });
+
+    io.to(`user:${req.user.userId.toString()}`).emit(
+      "notification",
+      notification
+    );
+
+    //STEP:9 RETURN SUCCESS MESSAGE
 
     return res
       .status(201)
@@ -306,6 +325,24 @@ const saveAIGroupTodo = async (req, res) => {
     // STEP 7: Commit Transaction
     await session.commitTransaction();
 
+    //STEP:8 EMIT SOCKET EVENT FOR TASK CREATED
+    const notification = new Notification.create({
+      user: req.user.userId,
+      sender: req.user.userId,
+      type: "TASK_CREATED",
+      title: "Task Created",
+      message: "You have created a new task",
+      todo: todo._id,
+      isRead: false,
+    });
+
+    io.to(`user:${req.user.userId.toString()}`).emit(
+      "notification",
+      notification
+    );
+
+    //STEP:9 RETURN SUCCESS MESSAGE
+
     return res
       .status(201)
       .json(
@@ -368,7 +405,21 @@ const updateGroupTodo = async (req, res) => {
     // STEP 4: Save
     await todo.save();
 
-    // STEP 5: Response
+    //STEP:5 CREATE NOTIFICATION
+    const notification = await Notification.create({
+      user: req.user.userId,
+      sender: req.user.userId,
+      type: "TASK_UPDATED",
+      title: "Task updated",
+      message: "task update successfully",
+      todo: todo._id,
+      isRead: false,
+    });
+
+    //STEP:6 EMIT NOTIFICATION
+    io.to(`user:${req.user.userId}`).emit("notification", notification);
+
+    // STEP 7: Response
     return res
       .status(200)
       .json(new ApiResponse(200, todo, "Task updated successfully", true));
@@ -383,26 +434,33 @@ const updateGroupTodoStatus = async (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
 
-    //STEP:1 VALIDE THE ID
+    // STEP 1: Validate Task ID
     if (!Mongoose.Types.ObjectId.isValid(id)) {
       return res
         .status(400)
         .json(new ApiResponse(400, null, "Invalid task ID", false));
     }
 
-    if (!status) {
+    // STEP 2: Validate Status
+    const validStatus = [
+      "START",
+      "PENDING",
+      "ON_GOING",
+      "COMPLETED",
+      "IN_COMPLETE",
+    ];
+
+    if (!status || !validStatus.includes(status)) {
       return res
         .status(400)
-        .json(new ApiResponse(400, null, "Status is required", false));
+        .json(new ApiResponse(400, null, "Invalid task status", false));
     }
+
+    // STEP 3: Find Task
     const todo = await Todo.findOne({
       _id: id,
       isDeleted: false,
       isArchived: false,
-      $or: [
-        { createdBy: req.user.userId },
-        { "participants.user": req.user.userId },
-      ],
     });
 
     if (!todo) {
@@ -411,36 +469,129 @@ const updateGroupTodoStatus = async (req, res) => {
         .json(new ApiResponse(404, null, "Task not found", false));
     }
 
-    // By default, if the creator is making the request, they are the owner
-    let role = "owner";
-    if (todo.createdBy.toString() !== req.user.userId.toString()) {
-      const member = todo.participants.find(
-        (p) => p.user.toString() === req.user.userId.toString()
-      );
+    const userId = req.user.userId.toString();
+    const isGroupTask = todo.participants.length > 0;
 
-      role = member.role;
+    // STEP 4: Authorization
+    if (!isGroupTask) {
+      // Personal Task
+      if (todo.createdBy.toString() !== userId) {
+        return res
+          .status(403)
+          .json(
+            new ApiResponse(
+              403,
+              null,
+              "You are not authorized to update this task.",
+              false
+            )
+          );
+      }
+    } else {
+      // Group Task
+      let role = "owner";
+      const isGroupTask = todo.participants.length > 0;
+
+      if (todo.createdBy.toString() !== userId) {
+        const participant = todo.participants.find(
+          (p) => p.user.toString() === userId
+        );
+
+        if (!participant) {
+          return res
+            .status(403)
+            .json(
+              new ApiResponse(
+                403,
+                null,
+                "You are not a participant of this task.",
+                false
+              )
+            );
+        }
+
+        role = participant.role;
+      }
+
+      if (!["owner", "editor", "contributor"].includes(role)) {
+        return res
+          .status(403)
+          .json(
+            new ApiResponse(
+              403,
+              null,
+              "You don't have permission to update this task.",
+              false
+            )
+          );
+      }
     }
 
-    // Permission check
-    if (!["owner", "editor", "contributor"].includes(role)) {
+    // STEP 5: Prevent duplicate updates
+    if (todo.status === status) {
       return res
-        .status(403)
+        .status(400)
         .json(
           new ApiResponse(
-            403,
+            400,
             null,
-            "You don't have permission to update this task",
+            `Task is already marked as ${status}.`,
             false
           )
         );
     }
 
+    const previousStatus = todo.status;
+
+    // STEP 6: Update Status
     todo.status = status;
     await todo.save();
+
+    // STEP 7: Notifications & Socket.IO (Only Group Tasks)
+    if (isGroupTask) {
+      const recipients = [
+        todo.createdBy.toString(),
+        ...todo.participants.map((p) => p.user.toString()),
+      ];
+
+      // Remove duplicates & exclude current user
+      const uniqueRecipients = [...new Set(recipients)].filter(
+        (id) => id !== userId
+      );
+
+      if (uniqueRecipients.length) {
+        const notifications = uniqueRecipients.map((receiverId) => ({
+          user: receiverId,
+          sender: req.user.userId,
+          task: todo._id,
+          type: "TASK_STATUS_UPDATED",
+          title: "Task Status Updated",
+          message: `${req.user.name} changed the task status from ${previousStatus} to ${status}.`,
+        }));
+
+        await Notification.insertMany(notifications);
+      }
+
+      // Emit realtime event
+      req.io.to(`task:${todo._id}`).emit("task:status-updated", {
+        taskId: todo._id,
+        previousStatus,
+        currentStatus: status,
+        updatedBy: {
+          _id: req.user.userId,
+          name: req.user.name,
+        },
+      });
+    }
+
     return res
       .status(200)
-      .json(new ApiResponse(200, todo, "Status updated successfully", true));
+      .json(
+        new ApiResponse(200, todo, "Task status updated successfully.", true)
+      );
   } catch (error) {
+    console.error(error);
+
     return res
       .status(500)
       .json(new ApiResponse(500, null, error.message, false));
@@ -476,6 +627,20 @@ const deleteGroupTodo = async (req, res) => {
     task.isDeleted = true;
     task.deletedAt = new Date();
     await task.save();
+
+    //STEP:5 CREATE NOTIFICATION
+    const notification = await Notification.create({
+      user:req.user.userId,
+      sender:req.user.userId,
+      type:"TASK_REMOVED",
+      title:"Task removed",
+      message:"Task remove successfully",
+      todo:task._id,
+      isRead:false,
+    })
+
+    //EMIT NOTIFICATION
+    req.io.to(`user:${req.user.userId.toString()}`).emit("notification",notification)
 
     //STEP:5 RETURN SUCCESS MESSAGE
     return res
@@ -615,6 +780,19 @@ const restoreDeletedGroupTodo = async (req, res) => {
     task.isDeleted = false;
     await task.save();
 
+    //STEP:5 CREATE NOTIFICATION
+    const notification = await Notification.create({
+      user: req.user.userId,
+      sender: req.user.userId,
+      type: "TASK_RESTORE",
+      title:"Task restored",
+      message:"Task restored successfully",
+      todo:task._id,
+      isRead:false
+    });
+
+    req.io.to(`user:${req.user.userId.toString()}`).emit("notification",notification)
+
     //STEP:5 RETURN SUCCESS MESSAGE
     return res
       .status(200)
@@ -653,6 +831,21 @@ const restoreArchiveGroupTodo = async (req, res) => {
     }
     task.isArchived = false;
     await task.save();
+
+    //STEP:5 CREATE NOTIFICATION
+    const notification = await Notification.create({
+      user: req.user.userId,
+      sender: req.user.userId,
+      type: "TASK_RESTORE",
+      title: "Task restored",
+      message: "Task restored successfully",
+      todo: task._id,
+      isRead: false,
+    });
+
+    req.io
+      .to(`user:${req.user.userId.toString()}`)
+      .emit("notification", notification);
 
     //STEP:5 RETURN SUCCESS MESSAGE
     return res
@@ -960,6 +1153,8 @@ const getGroupMembers = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
+
+//TO BE CONTINUE TO SEND NOTIFICATION FROM HERE
 const updateMemberRole = async (req, res) => {
   try {
     const { id, memberId } = req.params;
@@ -1001,8 +1196,8 @@ const updateMemberRole = async (req, res) => {
     }
 
     member.role = role;
-
     await task.save();
+
 
     return res
       .status(200)
@@ -1447,7 +1642,7 @@ const rejectGroupInvitation = async (req, res) => {
     });
 
     //STEP:9 EMIT NOTIFIACTION TO THE USER
-   io.to(`user:${ownerId}`).emit("notification:new", notification);
+    io.to(`user:${ownerId}`).emit("notification:new", notification);
 
     //STEP:7 RETURN SUCCESS RESPONSE
     return res
@@ -1456,7 +1651,9 @@ const rejectGroupInvitation = async (req, res) => {
         new ApiResponse(200, invite, "Invitation rejected successfully", true)
       );
   } catch (error) {
-    return res.status(500).json(new ApiResponse(500,null,error.message,false));
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
   }
 };
 const cloneGroupTask = async (req, res) => {};
