@@ -630,17 +630,19 @@ const deleteGroupTodo = async (req, res) => {
 
     //STEP:5 CREATE NOTIFICATION
     const notification = await Notification.create({
-      user:req.user.userId,
-      sender:req.user.userId,
-      type:"TASK_REMOVED",
-      title:"Task removed",
-      message:"Task remove successfully",
-      todo:task._id,
-      isRead:false,
-    })
+      user: req.user.userId,
+      sender: req.user.userId,
+      type: "TASK_REMOVED",
+      title: "Task removed",
+      message: "Task remove successfully",
+      todo: task._id,
+      isRead: false,
+    });
 
     //EMIT NOTIFICATION
-    req.io.to(`user:${req.user.userId.toString()}`).emit("notification",notification)
+    req.io
+      .to(`user:${req.user.userId.toString()}`)
+      .emit("notification", notification);
 
     //STEP:5 RETURN SUCCESS MESSAGE
     return res
@@ -785,13 +787,15 @@ const restoreDeletedGroupTodo = async (req, res) => {
       user: req.user.userId,
       sender: req.user.userId,
       type: "TASK_RESTORE",
-      title:"Task restored",
-      message:"Task restored successfully",
-      todo:task._id,
-      isRead:false
+      title: "Task restored",
+      message: "Task restored successfully",
+      todo: task._id,
+      isRead: false,
     });
 
-    req.io.to(`user:${req.user.userId.toString()}`).emit("notification",notification)
+    req.io
+      .to(`user:${req.user.userId.toString()}`)
+      .emit("notification", notification);
 
     //STEP:5 RETURN SUCCESS MESSAGE
     return res
@@ -1197,7 +1201,6 @@ const updateMemberRole = async (req, res) => {
 
     member.role = role;
     await task.save();
-
 
     return res
       .status(200)
@@ -1656,7 +1659,162 @@ const rejectGroupInvitation = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-const cloneGroupTask = async (req, res) => {};
+const cloneGroupTask = async (req, res) => {
+  const session = await Mongoose.startSession();
+
+  try {
+    session.startTransaction();
+
+    const { id } = req.params;
+
+    // STEP 1: Validate Task ID
+    if (!Mongoose.Types.ObjectId.isValid(id)) {
+      await session.abortTransaction();
+
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task ID", false));
+    }
+
+    // STEP 2: Find Task
+    const task = await Todo.findOne({
+      _id: id,
+      isDeleted: false,
+      isArchived: false,
+    }).session(session);
+
+    if (!task) {
+      await session.abortTransaction();
+
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    const userId = req.user.userId.toString();
+
+    // STEP 3: Authorization
+    let allowed = false;
+
+    if (task.createdBy.toString() === userId) {
+      allowed = true;
+    } else {
+      const participant = task.participants.find(
+        (p) => p.user.toString() === userId
+      );
+
+      if (
+        participant &&
+        ["owner", "editor", "contributor"].includes(participant.role)
+      ) {
+        allowed = true;
+      }
+    }
+
+    if (!allowed) {
+      await session.abortTransaction();
+
+      return res
+        .status(403)
+        .json(
+          new ApiResponse(
+            403,
+            null,
+            "You don't have permission to clone this task.",
+            false
+          )
+        );
+    }
+
+    // STEP 4: Create cloned task
+    const [clonedTask] = await Todo.create(
+      [
+        {
+          title: `${task.title} (Copy)`,
+          description: task.description,
+          source: task.source,
+          priority: task.priority,
+          estimatedHours: task.estimatedHours,
+          deadline: task.deadline,
+          tags: [...task.tags],
+
+          createdBy: req.user.userId,
+
+          // Don't copy collaborators
+          participants: [],
+
+          // Don't copy subtasks
+          SubTodos: [],
+
+          // Don't copy invitations
+          taskInvitations: [],
+
+          // Fresh task
+          status: "START",
+          isArchived: false,
+          isDeleted: false,
+          deletedAt: null,
+        },
+      ],
+      { session }
+    );
+
+    // STEP 5: Add cloned task to user's account
+    await User.findByIdAndUpdate(
+      req.user.userId,
+      {
+        $push: {
+          groupTasks: clonedTask._id,
+        },
+        $inc: {
+          totalGroupTasks: 1,
+        },
+      },
+      { session }
+    );
+
+    let notification = null;
+
+    // STEP 6: Notify only original owner (if another user cloned it)
+    if (task.createdBy.toString() !== userId) {
+      [notification] = await Notification.create(
+        [
+          {
+            user: task.createdBy,
+            sender: req.user.userId,
+            task: task._id,
+            type: "TASK_CLONED",
+            title: "Task Cloned",
+            message: `${req.user.name} cloned your task "${task.title}".`,
+            isRead: false,
+          },
+        ],
+        { session }
+      );
+    }
+
+    await session.commitTransaction();
+
+    // STEP 7: Realtime notification to original owner
+    if (notification) {
+      req.io.to(`user:${task.createdBy}`).emit("notification", notification);
+    }
+
+    return res
+      .status(201)
+      .json(
+        new ApiResponse(201, clonedTask, "Task cloned successfully.", true)
+      );
+  } catch (error) {
+    await session.abortTransaction();
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  } finally {
+    session.endSession();
+  }
+};
 const commentGroupTaks = async (req, res) => {};
 const getCommentsGroupTasks = async (req, res) => {};
 const updateCommentsGroupTasks = async (req, res) => {};
