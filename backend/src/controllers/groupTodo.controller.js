@@ -2086,6 +2086,42 @@ const updateCommentsGroupTasks = async (req, res) => {
         runValidators: true,
       }
     ).populate("user", "name email profileImage");
+
+    // STEP: Notifications
+    if (!isOwner) {
+      const recipients = [
+        task.createdBy.toString(),
+        ...task.participants.map((participant) => participant.user.toString()),
+      ];
+
+      const uniqueRecipients = [...new Set(recipients)].filter(
+        (recipientId) => recipientId !== req.user.userId
+      );
+
+      if (uniqueRecipients.length) {
+        const notifications = uniqueRecipients.map((recipientId) => ({
+          user: recipientId,
+          sender: req.user.userId,
+          todo: task._id,
+          type: "TASK_UPDATED", // or create COMMENT_UPDATED if you prefer
+          title: "Comment Updated",
+          message: `${req.user.name} updated a comment on the task.`,
+        }));
+
+        await Notification.insertMany(notifications);
+      }
+    }
+
+    // STEP: Socket Event
+    req.io.to(`task:${task._id}`).emit("task:comment-updated", {
+      taskId: task._id,
+      comment: updatedComment,
+      updatedBy: {
+        _id: req.user.userId,
+        name: req.user.name,
+      },
+    });
+
     //return success message
     return res
       .status(200)
