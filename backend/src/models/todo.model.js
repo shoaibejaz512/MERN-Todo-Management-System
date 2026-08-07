@@ -102,7 +102,12 @@ const todoSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
-
+    comments:[
+      {
+        type:mongoose.Schema.Types.ObjectId,
+        ref:"Comment"
+      }
+    ],
     deletedAt: {
       type: Date,
       default: null,

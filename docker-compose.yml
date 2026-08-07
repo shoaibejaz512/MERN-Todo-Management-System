@@ -1,10 +1,91 @@
-version:'5'
+version: '3.9'
+
 services:
+
   front:
+
     build:
-      context:'./frontend'
-      dockerfile:DockerFile
-      ports:
-        - 3000:3000
-      container_name:react-container
-      
+      context: './frontend'
+      dockerfile: Dockerfile
+
+    ports:
+      - "3000:3000"
+
+    container_name: react-container
+
+    environment:
+      - REACT_APP_API_URL=http://localhost:5000
+
+    networks:
+      - mern-stack-network
+
+    volumes:
+      - ./frontend:/app
+
+    depends_on:
+      - backend
+
+  backend:
+
+    build:
+      context: './backend'
+      dockerfile: Dockerfile
+
+    ports:
+      - 5000:5000
+
+    container_name: backend-container
+
+    env_file:
+      - ./backend/.env
+
+    networks:
+      - mern-stack-network
+
+    volumes:
+      - ./backend:/app
+
+    depends_on:
+      - mongo
+      - redis
+
+  mongo:
+
+    image: mongo:8
+
+    ports:
+      - 27017:27017
+
+    container_name: mongo-container
+
+    networks:
+      - mern-stack-network
+
+    volumes:
+      - mongo-data:/data/db
+
+    environment:
+      MONGO_INITDB_DATABASE: flowdo
+
+  redis:
+    image: redis:7-alpine
+
+    container_name: redis
+
+    ports:
+      - 6379:6379
+
+    volumes:
+      - redis-data:/data
+
+    networks:
+      - mern-stack-network
+
+networks:
+  mern-stack-network:
+    driver: bridge
+
+volumes:
+  mongo-data:
+  redis-data:
+  

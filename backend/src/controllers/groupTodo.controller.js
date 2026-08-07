@@ -9,6 +9,7 @@ import { Invite } from "../models/invite.model.js";
 import { io } from "../../server.js";
 import { ta } from "zod/v4/locales";
 import { Notification } from "../models/notification.model.js";
+import { Comment } from "../models/comment.model.js";
 
 const createGroupTodo = async (req, res) => {
   const session = await mongoose.startSession();
@@ -1815,8 +1816,200 @@ const cloneGroupTask = async (req, res) => {
     session.endSession();
   }
 };
-const commentGroupTaks = async (req, res) => {};
-const getCommentsGroupTasks = async (req, res) => {};
+const commentGroupTask = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { message } = req.body;
+
+    // STEP 1: Validate task id
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task id", false));
+    }
+
+    // STEP 2: Validate message
+    if (!message || !message.trim()) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Message is required", false));
+    }
+
+    // STEP 3: Find task
+    const task = await Todo.findOne({
+      _id: id,
+      isDeleted: false,
+      isArchived: false,
+    });
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    // STEP 4: Authorization
+    const userId = req.user.userId;
+    // STEP: Create notifications (Only when a participant comments)
+    const isOwner = task.createdBy.toString() === userId;
+
+    if (!isOwner) {
+      const recipients = [
+        task.createdBy.toString(),
+        ...task.participants.map((participant) => participant.user.toString()),
+      ];
+
+      // Remove duplicates and exclude the commenter
+      const uniqueRecipients = [...new Set(recipients)].filter(
+        (recipientId) => recipientId !== userId
+      );
+
+      if (uniqueRecipients.length) {
+        const notifications = uniqueRecipients.map((recipientId) => ({
+          user: recipientId,
+          sender: req.user.userId,
+          todo: task._id,
+          type: "TASK_COMMENTED",
+          title: "New Task Comment",
+          message: `${req.user.name} commented on the task.`,
+        }));
+
+        await Notification.insertMany(notifications);
+      }
+    }
+    const isParticipant = task.participants.some(
+      (participant) => participant.user.toString() === userId
+    );
+
+    if (!isOwner && !isParticipant) {
+      return res
+        .status(403)
+        .json(
+          new ApiResponse(
+            403,
+            null,
+            "You are not allowed to comment on this task",
+            false
+          )
+        );
+    }
+
+    // STEP 5: Create comment
+    const comment = await Comment.create({
+      user: userId,
+      message: message.trim(),
+    });
+
+    // STEP 6: Attach comment to task
+    task.comments.push(comment._id);
+    await task.save();
+
+    // Optional: Populate the comment author
+    await comment.populate("user", "name email profileImage");
+
+    // CREATE NOTIFICATION LIKE SOME OTHER PARTICIPENT COMMENT THEN WE NEED TO SEND NOTIFICATION TO THE OWNER AND PARTICIPENT AND WHEN OWNER COMMENT THEN NOT NEED TO SEND NOTIFICATION
+    req.io.to(`task:${task._id}`).emit("task:comment-added", {
+      taskId: task._id,
+      comment,
+    });
+
+    // STEP 7: Success response
+    return res
+      .status(201)
+      .json(new ApiResponse(201, comment, "Comment added successfully", true));
+  } catch (error) {
+    console.error(error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Internal Server Error", false));
+  }
+};
+const getCommentsGroupTasks = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(parseInt(req.query.limit) || 10, 50);
+    const skip = (page - 1) * limit;
+
+    // STEP 1: Validate Task ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task id", false));
+    }
+
+    // STEP 2: Find Task & Authorization
+    const task = await Todo.findOne({
+      _id: id,
+      isDeleted: false,
+      isArchived: false,
+      $or: [
+        { createdBy: req.user.userId },
+        {
+          participants: {
+            $elemMatch: {
+              user: req.user.userId,
+            },
+          },
+        },
+      ],
+    }).populate({
+      path: "comments",
+      options: {
+        sort: { createdAt: -1 },
+        skip,
+        limit,
+      },
+      populate: {
+        path: "user",
+        select: "name email profileImage",
+      },
+    });
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    // STEP 3: Pagination Metadata
+    const totalComments = task.comments.length;
+
+    // Better count using the stored ObjectId array
+    const total = await Todo.findById(id).select("comments");
+
+    const totalCount = total.comments.length;
+    const totalPages = Math.ceil(totalCount / limit);
+
+    // STEP 4: Success Response
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          comments: task.comments,
+          pagination: {
+            page,
+            limit,
+            totalComments: totalCount,
+            totalPages,
+            hasNextPage: page < totalPages,
+            hasPreviousPage: page > 1,
+          },
+        },
+        "Comments fetched successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error(error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
 const updateCommentsGroupTasks = async (req, res) => {};
 
 export {
