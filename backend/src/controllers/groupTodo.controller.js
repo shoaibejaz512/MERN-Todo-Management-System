@@ -2010,7 +2010,92 @@ const getCommentsGroupTasks = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-const updateCommentsGroupTasks = async (req, res) => {};
+const updateCommentsGroupTasks = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { message } = req.body;
+
+    // Validate message
+    if (!message || !message.trim()) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Message is required", false));
+    }
+
+    //VALIDATE THE ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid id", false));
+    }
+
+    //FIND THE COMMENT
+    const comment = await Comment.findOne({
+      _id: id,
+      user: req.user.userId,
+    });
+
+    if (!comment) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Comment not found", false));
+    }
+
+    //FIND TASK
+    const task = await Todo.findOne({
+      _id: comment.todo,
+      isDeleted: false,
+      isArchived: false,
+      $or: [
+        { createdBy: req.user.userId },
+        {
+          participants: {
+            $elemMatch: {
+              user: req.user.userId,
+            },
+          },
+        },
+      ],
+    });
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    const isOwner = task.createdBy.toString() === req.user.userId;
+
+    const isParticipant = task.participants.some(
+      (p) => p.user.toString() === req.user.userId
+    );
+
+    if (!isOwner && !isParticipant) {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, "Access denied", false));
+    }
+
+    const updatedComment = await Comment.findByIdAndUpdate(
+      id,
+      {
+        message: message.trim(),
+      },
+      {
+        new: true,
+        runValidators: true,
+      }
+    ).populate("user", "name email profileImage");
+    //return success message
+    return res
+      .status(200)
+      .json(new ApiResponse(200, updatedComment, "Comment updated", true));
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
 
 export {
   createGroupTodo,
