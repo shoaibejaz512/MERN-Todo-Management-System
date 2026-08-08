@@ -5,10 +5,20 @@ import { green } from "colorette";
 
 export const initializeSocket = (io) => {
   io.use(socketAuthMiddleware);
+
   io.on("connection", (socket) => {
     console.log(`User Connected: ${socket.id}`);
 
-    // Join a task room
+    // ==========================================
+    // PERSONAL USER ROOM
+    // ==========================================
+    socket.join(`user:${socket.userId}`);
+
+    console.log(green(`${socket.userId} joined user:${socket.userId}`));
+
+    // ==========================================
+    // JOIN TASK ROOM
+    // ==========================================
     socket.on("task:join", async ({ taskId }) => {
       try {
         if (!mongoose.Types.ObjectId.isValid(taskId)) {
@@ -16,12 +26,15 @@ export const initializeSocket = (io) => {
             message: "Invalid task id",
           });
         }
+
         const task = await Todo.findOne({
           _id: taskId,
           isDeleted: false,
           isArchived: false,
           $or: [
-            { createdBy: socket.userId },
+            {
+              createdBy: socket.userId,
+            },
             {
               participants: {
                 $elemMatch: {
@@ -52,13 +65,18 @@ export const initializeSocket = (io) => {
       }
     });
 
-    // Leave room
+    // ==========================================
+    // LEAVE TASK ROOM
+    // ==========================================
     socket.on("task:leave", ({ taskId }) => {
       socket.leave(`task:${taskId}`);
 
       console.log(`${socket.id} left task:${taskId}`);
     });
 
+    // ==========================================
+    // DISCONNECT
+    // ==========================================
     socket.on("disconnect", () => {
       console.log(`Disconnected: ${socket.id}`);
     });

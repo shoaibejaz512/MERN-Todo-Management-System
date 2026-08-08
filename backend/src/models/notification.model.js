@@ -16,6 +16,8 @@ const notificationSchema = new mongoose.Schema(
     type: {
       type: String,
       enum: [
+        "MEMBER_LEFT",
+        "MEMBER_REMOVED",
         "TASK_COMMENTED",
         "TASK_RESTORE",
         "TASK_UPDATED",

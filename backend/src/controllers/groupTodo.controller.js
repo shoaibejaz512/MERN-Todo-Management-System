@@ -1165,22 +1165,42 @@ const updateMemberRole = async (req, res) => {
     const { id, memberId } = req.params;
     const { role } = req.body;
 
-    //STEP:1 VALIDATE THE IDS
+    // ==========================================
+    // STEP 1: VALIDATE IDS
+    // ==========================================
     if (
       !mongoose.Types.ObjectId.isValid(id) ||
       !mongoose.Types.ObjectId.isValid(memberId)
     ) {
       return res
         .status(400)
-        .json(new ApiResponse(400, null, "Invalide ids", false));
+        .json(
+          new ApiResponse(400, null, "Invalid task id or member id", false)
+        );
     }
 
-    //STEP:2 FIND THE TASK
+    // ==========================================
+    // STEP 2: VALIDATE ROLE
+    // ==========================================
+    const allowedRoles = ["viewer", "contributor", "editor", "owner"];
+
+    if (!allowedRoles.includes(role)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid role", false));
+    }
+
+    // ==========================================
+    // STEP 3: FIND TASK
+    // ==========================================
     const task = await Todo.findOne({
       _id: id,
       createdBy: req.user.userId,
       isDeleted: false,
       isArchived: false,
+    }).populate({
+      path: "participants",
+      select: "user role",
     });
 
     if (!task) {
@@ -1189,23 +1209,54 @@ const updateMemberRole = async (req, res) => {
         .json(new ApiResponse(404, null, "Task not found", false));
     }
 
+    // ==========================================
+    // STEP 4: FIND MEMBER
+    // ==========================================
     const member = task.participants.find(
       (participant) => participant.user.toString() === memberId
     );
 
     if (!member) {
-      // Member not found
       return res
         .status(404)
         .json(new ApiResponse(404, null, "Member not found", false));
     }
 
+    // ==========================================
+    // STEP 5: UPDATE ROLE
+    // ==========================================
+    const oldRole = member.role;
+
     member.role = role;
+
     await task.save();
 
+    // ==========================================
+    // STEP 6: CREATE NOTIFICATION
+    // ==========================================
+    const notification = await Notification.create({
+      user: memberId, // RECIPIENT
+      sender: req.user.userId, // OWNER
+      type: "TASK_ROLE_CHANGED",
+      title: "Task Role Changed",
+      message: `Your role on "${task.title}" has been changed from ${oldRole} to ${role}.`,
+      todo: task._id,
+      isRead: false,
+    });
+
+    // ==========================================
+    // STEP 7: EMIT REAL-TIME NOTIFICATION
+    // ==========================================
+    io.to(`user:${memberId}`).emit("notification:new", notification);
+
+    // ==========================================
+    // STEP 8: RESPONSE
+    // ==========================================
     return res
       .status(200)
-      .json(new ApiResponse(200, task, "Role updated successfully", true));
+      .json(
+        new ApiResponse(200, task, "Member role updated successfully", true)
+      );
   } catch (error) {
     return res
       .status(500)
@@ -1216,19 +1267,23 @@ const removeMember = async (req, res) => {
   try {
     const { id, memberId } = req.params;
 
-    //STEP:1 VALIDATE THE IDS
+    // ==========================================
+    // STEP 1: VALIDATE IDS
+    // ==========================================
     if (
       !mongoose.Types.ObjectId.isValid(id) ||
       !mongoose.Types.ObjectId.isValid(memberId)
     ) {
       return res
         .status(400)
-        .json(new ApiResponse(400, null, "Invalide ids", false));
+        .json(
+          new ApiResponse(400, null, "Invalid task id or member id", false)
+        );
     }
 
-    //STEP:2 FIND TASK AND UPDATE THE TASK PARTICIPENT AND PULL THE USER FORM ARRAY
-
-    //STEP:2 FIND THE TASK
+    // ==========================================
+    // STEP 2: FIND TASK
+    // ==========================================
     const task = await Todo.findOne({
       _id: id,
       createdBy: req.user.userId,
@@ -1242,6 +1297,9 @@ const removeMember = async (req, res) => {
         .json(new ApiResponse(404, null, "Task not found", false));
     }
 
+    // ==========================================
+    // STEP 3: FIND MEMBER
+    // ==========================================
     const member = task.participants.find(
       (participant) => participant.user.toString() === memberId
     );
@@ -1249,11 +1307,13 @@ const removeMember = async (req, res) => {
     if (!member) {
       return res
         .status(404)
-        .json(new ApiResponse(404, null, "Not a member of task", false));
+        .json(new ApiResponse(404, null, "Not a member of this task", false));
     }
 
-    //STEP:3 CHECK OWNER CANNOT REMOVE FROM TASK
-    if (member.role == "owner") {
+    // ==========================================
+    // STEP 4: OWNER PROTECTION
+    // ==========================================
+    if (member.role === "owner") {
       return res
         .status(400)
         .json(
@@ -1261,8 +1321,16 @@ const removeMember = async (req, res) => {
         );
     }
 
-    const updatedTask = await Todo.findByIdAndUpdate(
-      id,
+    // ==========================================
+    // STEP 5: REMOVE MEMBER
+    // ==========================================
+    const updatedTask = await Todo.findOneAndUpdate(
+      {
+        _id: id,
+        createdBy: req.user.userId,
+        isDeleted: false,
+        isArchived: false,
+      },
       {
         $pull: {
           participants: {
@@ -1274,6 +1342,34 @@ const removeMember = async (req, res) => {
         new: true,
       }
     );
+
+    if (!updatedTask) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task could not be updated", false));
+    }
+
+    // ==========================================
+    // STEP 6: CREATE NOTIFICATION
+    // ==========================================
+    const notification = await Notification.create({
+      user: memberId,
+      sender: req.user.userId,
+      type: "MEMBER_REMOVED",
+      title: "Removed from task",
+      message: `You have been removed from "${task.title}".`,
+      todo: task._id,
+      isRead: false,
+    });
+
+    // ==========================================
+    // STEP 7: SEND REAL-TIME NOTIFICATION
+    // ==========================================
+    io.to(`user:${memberId}`).emit("notification:new", notification);
+
+    // ==========================================
+    // STEP 8: RESPONSE
+    // ==========================================
     return res
       .status(200)
       .json(
@@ -1287,17 +1383,21 @@ const removeMember = async (req, res) => {
 };
 const leaveGroupTodo = async (req, res) => {
   try {
-    //task id
     const { id } = req.params;
+    const userId = req.user.userId;
 
-    //STEP:1 VALIDATE THE ID
+    // ==========================================
+    // STEP 1: VALIDATE TASK ID
+    // ==========================================
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res
         .status(400)
-        .json(new ApiResponse(400, null, "Invalid id", false));
+        .json(new ApiResponse(400, null, "Invalid task id", false));
     }
 
-    //STEP:2 FIND THE TASK
+    // ==========================================
+    // STEP 2: FIND TASK
+    // ==========================================
     const task = await Todo.findOne({
       _id: id,
       isDeleted: false,
@@ -1310,13 +1410,14 @@ const leaveGroupTodo = async (req, res) => {
         .json(new ApiResponse(404, null, "Task not found", false));
     }
 
-    //STEP:2 FIND THE REQUESTED PARTICIPENTS FROM TASK PRTICIPENT
-
+    // ==========================================
+    // STEP 3: FIND REQUESTING MEMBER
+    // ==========================================
     const member = task.participants.find(
-      (participant) => participant.user.toString() === req.user.userId
+      (participant) => participant.user.toString() === userId
     );
 
-    //check first the req user is the participent or not
+    // User is not a participant
     if (!member) {
       return res
         .status(403)
@@ -1330,20 +1431,42 @@ const leaveGroupTodo = async (req, res) => {
         );
     }
 
-    //STEP:3 OWNER CANNOT LEAVE THE GROUP
+    // ==========================================
+    // STEP 4: OWNER CANNOT LEAVE
+    // ==========================================
     if (member.role === "owner") {
       return res
         .status(400)
-        .json(new ApiResponse(400, null, "Access Denied", false));
+        .json(
+          new ApiResponse(400, null, "Task owner cannot leave the group", false)
+        );
     }
 
-    //STEP:4 UPDATE THE TASK AND REMOVE THE MEMBER FROM THE TASK
-    const updatedTask = await Todo.findByIdAndUpdate(
-      id,
+    // ==========================================
+    // STEP 5: GET REMAINING MEMBERS
+    // ==========================================
+    const remainingMembers = task.participants
+      .filter((participant) => participant.user.toString() !== userId)
+      .map((participant) => participant.user.toString());
+
+    // ==========================================
+    // STEP 6: REMOVE MEMBER
+    // ==========================================
+    const updatedTask = await Todo.findOneAndUpdate(
+      {
+        _id: id,
+        isDeleted: false,
+        isArchived: false,
+        participants: {
+          $elemMatch: {
+            user: userId,
+          },
+        },
+      },
       {
         $pull: {
           participants: {
-            user: req.user.userId,
+            user: userId,
           },
         },
       },
@@ -1352,6 +1475,49 @@ const leaveGroupTodo = async (req, res) => {
       }
     );
 
+    if (!updatedTask) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Member could not be removed", false));
+    }
+
+    // ==========================================
+    // STEP 7: CREATE NOTIFICATIONS
+    // ==========================================
+    const notifications = remainingMembers.map((recipientId) => ({
+      user: recipientId,
+      sender: userId,
+      type: "MEMBER_LEFT",
+      title: "Member left the task",
+      message: `A member has left "${task.title}".`,
+      todo: task._id,
+      isRead: false,
+    }));
+
+    const createdNotifications =
+      notifications.length > 0
+        ? await Notification.insertMany(notifications)
+        : [];
+
+    // ==========================================
+    // STEP 8: BROADCAST TO TASK ROOM
+    // EXCLUDE THE MEMBER WHO LEFT
+    // ==========================================
+    if (remainingMembers.length > 0) {
+      io.to(`task:${id}`)
+        .except(`user:${userId}`)
+        .emit("notification", {
+          type: "MEMBER_LEFT",
+          title: "Member left the task",
+          message: `A member has left "${task.title}".`,
+          todo: task._id,
+          sender: userId,
+        });
+    }
+
+    // ==========================================
+    // STEP 9: RESPONSE
+    // ==========================================
     return res
       .status(200)
       .json(
