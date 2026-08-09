@@ -134,6 +134,27 @@ const createGroupTodo = async (req, res) => {
       { session }
     );
 
+    // ========================================== // STEP 7: Create Task Activity // ==========================================  //
+    const [activity] = await TaskActivity.create(
+      [
+        {
+          todo: todo._id,
+          actor: req.user.userId,
+          targetUser: null,
+          type: "TASK_CREATED",
+          message: "A new group task was created.",
+          metadata: {
+            extra: {
+              title: todo.title,
+              subTaskCount: subTodoIds.length,
+              source: todo.source,
+            },
+          },
+        },
+      ],
+      { session }
+    );
+
     // STEP 7: Commit Transaction
     await session.commitTransaction();
 
@@ -203,13 +224,13 @@ const generateAIGroupTodo = async (req, res) => {
 };
 const saveAIGroupTodo = async (req, res) => {
   const session = await mongoose.startSession();
+
   try {
     session.startTransaction();
 
     const {
       title,
       description,
-      source,
       priority,
       estimatedHours,
       deadline,
@@ -217,7 +238,10 @@ const saveAIGroupTodo = async (req, res) => {
       subTasks,
     } = req.body;
 
+    // ==========================================
     // STEP 1: Validate Main Task
+    // ==========================================
+
     if (
       !title ||
       !description ||
@@ -238,7 +262,10 @@ const saveAIGroupTodo = async (req, res) => {
         );
     }
 
+    // ==========================================
     // STEP 2: Validate SubTasks
+    // ==========================================
+
     for (const task of subTasks) {
       if (!task.title || !task.description) {
         await session.abortTransaction();
@@ -256,7 +283,10 @@ const saveAIGroupTodo = async (req, res) => {
       }
     }
 
+    // ==========================================
     // STEP 3: Create SubTodos
+    // ==========================================
+
     const createdSubTodos = await SubTodo.insertMany(
       subTasks.map((task) => ({
         ...task,
@@ -267,20 +297,23 @@ const saveAIGroupTodo = async (req, res) => {
 
     const subTodoIds = createdSubTodos.map((todo) => todo._id);
 
-    // STEP 4: Create Group Task
+    // ==========================================
+    // STEP 4: Create AI Group Task
+    // ==========================================
+
     const createdTodo = await Todo.create(
       [
         {
           title,
           description,
-          source,
+          source: "ai",
           priority,
           estimatedHours,
           deadline,
           tags,
           SubTodos: subTodoIds,
           createdBy: req.user.userId,
-          source: "ai",
+
           participants: [
             {
               user: req.user.userId,
@@ -294,7 +327,10 @@ const saveAIGroupTodo = async (req, res) => {
 
     const todo = createdTodo[0];
 
+    // ==========================================
     // STEP 5: Update SubTodos with Group ID
+    // ==========================================
+
     await SubTodo.updateMany(
       {
         _id: {
@@ -309,7 +345,10 @@ const saveAIGroupTodo = async (req, res) => {
       { session }
     );
 
+    // ==========================================
     // STEP 6: Update User
+    // ==========================================
+
     await User.findByIdAndUpdate(
       req.user.userId,
       {
@@ -320,49 +359,89 @@ const saveAIGroupTodo = async (req, res) => {
           totalGroupTasks: 1,
         },
       },
+      {
+        session,
+        new: true,
+      }
+    );
+
+    // ==========================================
+    // STEP 7: Create Task Activity
+    // ==========================================
+
+    const [activity] = await TaskActivity.create(
+      [
+        {
+          todo: todo._id,
+          actor: req.user.userId,
+          targetUser: null,
+
+          type: "TASK_CREATED",
+
+          message: "An AI-generated group task was created.",
+
+          metadata: {
+            extra: {
+              source: "ai",
+              subTaskCount: subTodoIds.length,
+            },
+          },
+        },
+      ],
       { session }
     );
 
-    // STEP 7: Commit Transaction
+    // ==========================================
+    // STEP 8: Commit Transaction
+    // ==========================================
+
     await session.commitTransaction();
 
-    //STEP:8 EMIT SOCKET EVENT FOR TASK CREATED
-    const notification = new Notification.create({
+    // ==========================================
+    // STEP 9: Create Notification
+    // ==========================================
+
+    const notification = await Notification.create({
       user: req.user.userId,
       sender: req.user.userId,
       type: "TASK_CREATED",
-      title: "Task Created",
-      message: "You have created a new task",
+      title: "AI Task Created",
+      message: "Your AI-generated task has been created successfully.",
       todo: todo._id,
       isRead: false,
     });
+
+    // ==========================================
+    // STEP 10: Emit Notification
+    // ==========================================
 
     io.to(`user:${req.user.userId.toString()}`).emit(
       "notification",
       notification
     );
 
-    //STEP:9 RETURN SUCCESS MESSAGE
+    // ==========================================
+    // STEP 11: Return Response
+    // ==========================================
 
     return res
       .status(201)
       .json(
-        new ApiResponse(201, todo, "Group task created successfully.", true)
+        new ApiResponse(201, todo, "AI group task created successfully.", true)
       );
   } catch (error) {
-    // Rollback Everything
     await session.abortTransaction();
 
     return res
       .status(500)
       .json(new ApiResponse(500, null, error.message, false));
   } finally {
-    // End Session
-    session.endSession();
+    await session.endSession();
   }
 };
 const updateGroupTodo = async (req, res) => {
   const { id } = req.params;
+
   try {
     const {
       title,
@@ -374,56 +453,237 @@ const updateGroupTodo = async (req, res) => {
       status,
     } = req.body;
 
-    //STEP:1 VALIDE THE ID
-    if (!Mongoose.Types.ObjectId.isValid(id)) {
+    // ==========================================
+    // STEP 1: Validate ID
+    // ==========================================
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
       return res
         .status(400)
         .json(new ApiResponse(400, null, "Invalid task ID", false));
     }
-    //STEP:2 FIND THE TASK
+
+    // ==========================================
+    // STEP 2: Find Task
+    // ==========================================
+
     const todo = await Todo.findOne({
       _id: id,
       createdBy: req.user.userId,
       isDeleted: false,
       isArchived: false,
     });
-    //STEP:3 CHECK THE todo IF FIND OR NOT
+
     if (!todo) {
       return res
         .status(404)
         .json(new ApiResponse(404, null, "Task not found", false));
     }
 
-    // STEP 3: Update only provided fields
-    if (title !== undefined) todo.title = title;
-    if (description !== undefined) todo.description = description;
-    if (priority !== undefined) todo.priority = priority;
-    if (estimatedHours !== undefined) todo.estimatedHours = estimatedHours;
-    if (deadline !== undefined) todo.deadline = deadline;
-    if (tags !== undefined) todo.tags = tags;
-    if (status !== undefined) todo.status = status;
+    // ==========================================
+    // STEP 3: Track Activities
+    // ==========================================
 
-    // STEP 4: Save
+    const activities = [];
+
+    // ------------------------------------------
+    // TITLE
+    // ------------------------------------------
+
+    if (title !== undefined && title !== todo.title) {
+      activities.push({
+        todo: todo._id,
+        actor: req.user.userId,
+        type: "TITLE_UPDATED",
+        message: "Task title was updated.",
+        metadata: {
+          oldValue: todo.title,
+          newValue: title,
+        },
+      });
+
+      todo.title = title;
+    }
+
+    // ------------------------------------------
+    // DESCRIPTION
+    // ------------------------------------------
+
+    if (description !== undefined && description !== todo.description) {
+      activities.push({
+        todo: todo._id,
+        actor: req.user.userId,
+        type: "DESCRIPTION_UPDATED",
+        message: "Task description was updated.",
+        metadata: {
+          oldValue: todo.description,
+          newValue: description,
+        },
+      });
+
+      todo.description = description;
+    }
+
+    // ------------------------------------------
+    // PRIORITY
+    // ------------------------------------------
+
+    if (priority !== undefined && priority !== todo.priority) {
+      activities.push({
+        todo: todo._id,
+        actor: req.user.userId,
+        type: "PRIORITY_UPDATED",
+        message: "Task priority was updated.",
+        metadata: {
+          oldValue: todo.priority,
+          newValue: priority,
+        },
+      });
+
+      todo.priority = priority;
+    }
+
+    // ------------------------------------------
+    // ESTIMATED HOURS
+    // ------------------------------------------
+
+    if (
+      estimatedHours !== undefined &&
+      estimatedHours !== todo.estimatedHours
+    ) {
+      activities.push({
+        todo: todo._id,
+        actor: req.user.userId,
+        type: "TASK_UPDATED",
+        message: "Estimated hours were updated.",
+        metadata: {
+          oldValue: todo.estimatedHours,
+          newValue: estimatedHours,
+        },
+      });
+
+      todo.estimatedHours = estimatedHours;
+    }
+
+    // ------------------------------------------
+    // DEADLINE
+    // ------------------------------------------
+
+    if (deadline !== undefined && String(deadline) !== String(todo.deadline)) {
+      activities.push({
+        todo: todo._id,
+        actor: req.user.userId,
+        type: "DEADLINE_UPDATED",
+        message: "Task deadline was updated.",
+        metadata: {
+          oldValue: todo.deadline,
+          newValue: deadline,
+        },
+      });
+
+      todo.deadline = deadline;
+    }
+
+    // ------------------------------------------
+    // TAGS
+    // ------------------------------------------
+
+    if (
+      tags !== undefined &&
+      JSON.stringify(tags) !== JSON.stringify(todo.tags)
+    ) {
+      activities.push({
+        todo: todo._id,
+        actor: req.user.userId,
+        type: "TASK_UPDATED",
+        message: "Task tags were updated.",
+        metadata: {
+          oldValue: todo.tags,
+          newValue: tags,
+        },
+      });
+
+      todo.tags = tags;
+    }
+
+    // ------------------------------------------
+    // STATUS
+    // ------------------------------------------
+
+    if (status !== undefined && status !== todo.status) {
+      activities.push({
+        todo: todo._id,
+        actor: req.user.userId,
+        type: "STATUS_UPDATED",
+        message: "Task status was updated.",
+        metadata: {
+          oldValue: todo.status,
+          newValue: status,
+        },
+      });
+
+      todo.status = status;
+    }
+
+    // ==========================================
+    // STEP 4: Check whether anything changed
+    // ==========================================
+
+    if (activities.length === 0) {
+      return res
+        .status(200)
+        .json(
+          new ApiResponse(200, todo, "No changes were made to the task.", true)
+        );
+    }
+
+    // ==========================================
+    // STEP 5: Save Task
+    // ==========================================
+
     await todo.save();
 
-    //STEP:5 CREATE NOTIFICATION
+    // ==========================================
+    // STEP 6: Save Activities
+    // ==========================================
+
+    const createdActivities = await TaskActivity.insertMany(activities);
+
+    // ==========================================
+    // STEP 7: Create Notification
+    // ==========================================
+
     const notification = await Notification.create({
       user: req.user.userId,
       sender: req.user.userId,
       type: "TASK_UPDATED",
-      title: "Task updated",
-      message: "task update successfully",
+      title: "Task Updated",
+      message: "Your task was updated successfully.",
       todo: todo._id,
       isRead: false,
     });
 
-    //STEP:6 EMIT NOTIFICATION
+    // ==========================================
+    // STEP 8: Emit Notification
+    // ==========================================
+
     io.to(`user:${req.user.userId}`).emit("notification", notification);
 
-    // STEP 7: Response
+    // ==========================================
+    // STEP 9: Emit Activity to Task Room
+    // ==========================================
+
+    for (const activity of createdActivities) {
+      io.to(`task:${todo._id}`).emit("task:activity", activity);
+    }
+
+    // ==========================================
+    // STEP 10: Response
+    // ==========================================
+
     return res
       .status(200)
-      .json(new ApiResponse(200, todo, "Task updated successfully", true));
+      .json(new ApiResponse(200, todo, "Task updated successfully.", true));
   } catch (error) {
     return res
       .status(500)
@@ -436,7 +696,7 @@ const updateGroupTodoStatus = async (req, res) => {
     const { status } = req.body;
 
     // STEP 1: Validate Task ID
-    if (!Mongoose.Types.ObjectId.isValid(id)) {
+    if (!mongoose.Types.ObjectId.isValid(id)) {
       return res
         .status(400)
         .json(new ApiResponse(400, null, "Invalid task ID", false));
@@ -471,11 +731,16 @@ const updateGroupTodoStatus = async (req, res) => {
     }
 
     const userId = req.user.userId.toString();
-    const isGroupTask = todo.participants.length > 0;
+
+    // participants contains owner for group tasks
+    const isGroupTask = todo.participants?.length > 0;
 
     // STEP 4: Authorization
     if (!isGroupTask) {
-      // Personal Task
+      // ==============================
+      // PERSONAL TASK
+      // ==============================
+
       if (todo.createdBy.toString() !== userId) {
         return res
           .status(403)
@@ -489,9 +754,11 @@ const updateGroupTodoStatus = async (req, res) => {
           );
       }
     } else {
-      // Group Task
+      // ==============================
+      // GROUP TASK
+      // ==============================
+
       let role = "owner";
-      const isGroupTask = todo.participants.length > 0;
 
       if (todo.createdBy.toString() !== userId) {
         const participant = todo.participants.find(
@@ -528,7 +795,7 @@ const updateGroupTodoStatus = async (req, res) => {
       }
     }
 
-    // STEP 5: Prevent duplicate updates
+    // STEP 5: Prevent duplicate update
     if (todo.status === status) {
       return res
         .status(400)
@@ -546,34 +813,75 @@ const updateGroupTodoStatus = async (req, res) => {
 
     // STEP 6: Update Status
     todo.status = status;
+
     await todo.save();
 
-    // STEP 7: Notifications & Socket.IO (Only Group Tasks)
+    // ==================================================
+    // STEP 7: GROUP TASK ONLY
+    // Activity + Notification + Socket
+    // ==================================================
+
     if (isGroupTask) {
+      // ------------------------------------------
+      // Create Activity
+      // ------------------------------------------
+
+      const activity = await TaskActivity.create({
+        todo: todo._id,
+        actor: req.user.userId,
+        targetUser: null,
+
+        type: "STATUS_UPDATED",
+
+        message: `${req.user.name} changed the task status from ${previousStatus} to ${status}.`,
+
+        metadata: {
+          oldValue: previousStatus,
+          newValue: status,
+        },
+      });
+
+      // ------------------------------------------
+      // Get Other Participants
+      // ------------------------------------------
+
       const recipients = [
         todo.createdBy.toString(),
         ...todo.participants.map((p) => p.user.toString()),
       ];
 
-      // Remove duplicates & exclude current user
       const uniqueRecipients = [...new Set(recipients)].filter(
         (id) => id !== userId
       );
 
-      if (uniqueRecipients.length) {
+      // ------------------------------------------
+      // Create Notifications
+      // ------------------------------------------
+
+      if (uniqueRecipients.length > 0) {
         const notifications = uniqueRecipients.map((receiverId) => ({
           user: receiverId,
           sender: req.user.userId,
-          task: todo._id,
+          todo: todo._id,
           type: "TASK_STATUS_UPDATED",
           title: "Task Status Updated",
           message: `${req.user.name} changed the task status from ${previousStatus} to ${status}.`,
+          isRead: false,
         }));
 
         await Notification.insertMany(notifications);
       }
 
-      // Emit realtime event
+      // ------------------------------------------
+      // Realtime Activity
+      // ------------------------------------------
+
+      req.io.to(`task:${todo._id}`).emit("task:activity", activity);
+
+      // ------------------------------------------
+      // Realtime Status Update
+      // ------------------------------------------
+
       req.io.to(`task:${todo._id}`).emit("task:status-updated", {
         taskId: todo._id,
         previousStatus,
@@ -585,6 +893,7 @@ const updateGroupTodoStatus = async (req, res) => {
       });
     }
 
+    // STEP 8: Response
     return res
       .status(200)
       .json(
@@ -598,58 +907,155 @@ const updateGroupTodoStatus = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-const deleteGroupTodo = async (req, res) => {
+const deleteTodo = async (req, res) => {
   try {
     const { id } = req.params;
 
-    //STEP:1 VALIDE THE ID
-    if (!Mongoose.Types.ObjectId.isValid(id)) {
+    // ==========================================
+    // STEP 1: Validate Task ID
+    // ==========================================
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
       return res
         .status(400)
         .json(new ApiResponse(400, null, "Invalid task ID", false));
     }
 
-    //STEP:2 FINT THE GROU_TASK IN DATABASE
-    const task = new Todo.findOne({
+    // ==========================================
+    // STEP 2: Find Task
+    // Only owner can delete
+    // ==========================================
+
+    const task = await Todo.findOne({
       _id: id,
       createdBy: req.user.userId,
       isArchived: false,
       isDeleted: false,
     });
 
-    //STEP:3 CHECK THE TASK IS GET OR NOT
     if (!task) {
       return res
         .status(404)
         .json(new ApiResponse(404, null, "Task not found", false));
     }
 
-    //STEP:4 ASSIGN THIS TASK AS DELETED
+    const userId = req.user.userId.toString();
+
+    // ==========================================
+    // STEP 3: Determine Task Type
+    // ==========================================
+
+    const isGroupTask = task.participants?.length > 0;
+
+    // ==========================================
+    // STEP 4: Soft Delete Task
+    // ==========================================
+
     task.isDeleted = true;
     task.deletedAt = new Date();
+
     await task.save();
 
-    //STEP:5 CREATE NOTIFICATION
-    const notification = await Notification.create({
-      user: req.user.userId,
-      sender: req.user.userId,
-      type: "TASK_REMOVED",
-      title: "Task removed",
-      message: "Task remove successfully",
+    // ==========================================
+    // STEP 5: Personal Task
+    // No Activity
+    // No Notification
+    // No Socket
+    // ==========================================
+
+    if (!isGroupTask) {
+      return res
+        .status(200)
+        .json(new ApiResponse(200, task, "Task deleted successfully.", true));
+    }
+
+    // ==========================================
+    // STEP 6: Create Task Activity
+    // Group Task Only
+    // ==========================================
+
+    const activity = await TaskActivity.create({
       todo: task._id,
-      isRead: false,
+      actor: req.user.userId,
+      targetUser: null,
+
+      type: "TASK_DELETED",
+
+      message: `${req.user.name} deleted the task.`,
+
+      metadata: {
+        extra: {
+          action: "DELETE",
+        },
+      },
     });
 
-    //EMIT NOTIFICATION
-    req.io
-      .to(`user:${req.user.userId.toString()}`)
-      .emit("notification", notification);
+    // ==========================================
+    // STEP 7: Get All Group Members
+    // ==========================================
 
-    //STEP:5 RETURN SUCCESS MESSAGE
+    const recipients = [
+      task.createdBy.toString(),
+
+      ...task.participants.map((participant) => participant.user.toString()),
+    ];
+
+    // Remove duplicates
+    // Don't notify the person who deleted the task
+    const uniqueRecipients = [...new Set(recipients)].filter(
+      (receiverId) => receiverId !== userId
+    );
+
+    // ==========================================
+    // STEP 8: Create Notifications
+    // ==========================================
+
+    if (uniqueRecipients.length > 0) {
+      const notifications = uniqueRecipients.map((receiverId) => ({
+        user: receiverId,
+        sender: req.user.userId,
+        todo: task._id,
+
+        type: "TASK_REMOVED",
+
+        title: "Task Deleted",
+
+        message: `${req.user.name} deleted the task "${task.title}".`,
+
+        isRead: false,
+      }));
+
+      await Notification.insertMany(notifications);
+    }
+
+    // ==========================================
+    // STEP 9: Emit Activity
+    // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("task:activity", activity);
+
+    // ==========================================
+    // STEP 10: Emit Task Deleted Event
+    // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("task:deleted", {
+      taskId: task._id,
+      deletedBy: {
+        _id: req.user.userId,
+        name: req.user.name,
+      },
+    });
+
+    // ==========================================
+    // STEP 11: Return Success
+    // ==========================================
+
     return res
       .status(200)
-      .json(new ApiResponse(200, task, "Task Deleted", true));
+      .json(new ApiResponse(200, task, "Task deleted successfully.", true));
   } catch (error) {
+    console.error("Delete Todo Error:", error);
+
     return res
       .status(500)
       .json(new ApiResponse(500, null, error.message, false));
@@ -716,55 +1122,187 @@ const getGroupTodoById = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-const archiveGroupTodo = async (req, res) => {
+const archiveTodo = async (req, res) => {
   try {
-    //STEP:1 GET THE TASK ID
+    // ==========================================
+    // STEP 1: Get Task ID
+    // ==========================================
+
     const { id } = req.params;
-    //STEP:2 VALIDATE TEH ID
+
+    // ==========================================
+    // STEP 2: Validate Task ID
+    // ==========================================
+
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res
         .status(400)
-        .json(new ApiResponse(400, null, "Task ID Invalid", false));
+        .json(new ApiResponse(400, null, "Invalid task ID", false));
     }
-    //STEP:2 FIND THE PARTICULOR ID
-    const task = new Todo.findOne({
+
+    // ==========================================
+    // STEP 3: Find Task
+    // Only owner can archive
+    // ==========================================
+
+    const task = await Todo.findOne({
       _id: id,
       createdBy: req.user.userId,
       isDeleted: false,
       isArchived: false,
     });
 
-    //STEP:2 CHECK THE TASKS IS GET OR NOT
-    if (!tasks) {
-      return res.status(404).json(new ApiResponse(404, null, "Task not found"));
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
     }
 
+    const userId = req.user.userId.toString();
+
+    // ==========================================
+    // STEP 4: Determine Task Type
+    // ==========================================
+
+    const isGroupTask = task.participants?.length > 0;
+
+    // ==========================================
+    // STEP 5: Archive Task
+    // ==========================================
+
     task.isArchived = true;
+    task.archivedAt = new Date();
+
     await task.save();
 
-    //STEP:3 RETURN SUCCESS MESSAGE
+    // ==========================================
+    // STEP 6: Personal Task
+    // No activity
+    // No notification
+    // No socket
+    // ==========================================
+
+    if (!isGroupTask) {
+      return res
+        .status(200)
+        .json(new ApiResponse(200, task, "Task archived successfully.", true));
+    }
+
+    // ==========================================
+    // STEP 7: Create Task Activity
+    // Group Task Only
+    // ==========================================
+
+    const activity = await TaskActivity.create({
+      todo: task._id,
+      actor: req.user.userId,
+      targetUser: null,
+
+      type: "TASK_ARCHIVED",
+
+      message: `${req.user.name} archived the task.`,
+
+      metadata: {
+        extra: {
+          action: "ARCHIVE",
+        },
+      },
+    });
+
+    // ==========================================
+    // STEP 8: Get Group Members
+    // ==========================================
+
+    const recipients = [
+      task.createdBy.toString(),
+      ...task.participants.map((participant) => participant.user.toString()),
+    ];
+
+    // Remove duplicates
+    // Exclude current user
+    const uniqueRecipients = [...new Set(recipients)].filter(
+      (receiverId) => receiverId !== userId
+    );
+
+    // ==========================================
+    // STEP 9: Create Notifications
+    // ==========================================
+
+    if (uniqueRecipients.length > 0) {
+      const notifications = uniqueRecipients.map((receiverId) => ({
+        user: receiverId,
+        sender: req.user.userId,
+        todo: task._id,
+
+        type: "TASK_ARCHIVED",
+
+        title: "Task Archived",
+
+        message: `${req.user.name} archived the task "${task.title}".`,
+
+        isRead: false,
+      }));
+
+      await Notification.insertMany(notifications);
+    }
+
+    // ==========================================
+    // STEP 10: Emit Activity
+    // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("task:activity", activity);
+
+    // ==========================================
+    // STEP 11: Emit Archive Event
+    // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("task:archived", {
+      taskId: task._id,
+
+      archivedBy: {
+        _id: req.user.userId,
+        name: req.user.name,
+      },
+    });
+
+    // ==========================================
+    // STEP 12: Response
+    // ==========================================
+
     return res
       .status(200)
-      .json(new ApiResponse(200, task, "Task get successfully", true));
+      .json(new ApiResponse(200, task, "Task archived successfully.", true));
   } catch (error) {
+    console.error("Archive Todo Error:", error);
+
     return res
       .status(500)
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-const restoreDeletedGroupTodo = async (req, res) => {
+const restoreDeletedTodo = async (req, res) => {
   try {
-    //STEP:1 GET THE ID FROM PARAMS
+    // ==========================================
+    // STEP 1: Get Task ID
+    // ==========================================
+
     const { id } = req.params;
 
-    //STEP:2 VALIDATE TEH ID
+    // ==========================================
+    // STEP 2: Validate Task ID
+    // ==========================================
+
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res
         .status(400)
-        .json(new ApiResponse(400, null, "Task ID Invalid", false));
+        .json(new ApiResponse(400, null, "Invalid task ID", false));
     }
 
-    //STEP:3 FIND THE DELTED TASK
+    // ==========================================
+    // STEP 3: Find Deleted Task
+    // Only owner can restore
+    // ==========================================
+
     const task = await Todo.findOne({
       _id: id,
       createdBy: req.user.userId,
@@ -772,55 +1310,158 @@ const restoreDeletedGroupTodo = async (req, res) => {
       isArchived: false,
     });
 
-    //STEP:3 CHECK THE TASKS IS GET OR NOT
     if (!task) {
       return res
         .status(404)
-        .json(new ApiResponse(404, null, "Task not found", false));
+        .json(new ApiResponse(404, null, "Deleted task not found", false));
     }
 
-    //STEP:4 UPDATE THE DOCUMENT IN DATABASE
+    const userId = req.user.userId.toString();
+
+    // ==========================================
+    // STEP 4: Determine Task Type
+    // ==========================================
+
+    const isGroupTask = task.participants?.length > 0;
+
+    // ==========================================
+    // STEP 5: Restore Task
+    // ==========================================
+
     task.isDeleted = false;
+    task.deletedAt = null;
+
     await task.save();
 
-    //STEP:5 CREATE NOTIFICATION
-    const notification = await Notification.create({
-      user: req.user.userId,
-      sender: req.user.userId,
-      type: "TASK_RESTORE",
-      title: "Task restored",
-      message: "Task restored successfully",
+    // ==========================================
+    // STEP 6: Personal Task
+    // No activity
+    // No notification
+    // No socket
+    // ==========================================
+
+    if (!isGroupTask) {
+      return res
+        .status(200)
+        .json(new ApiResponse(200, task, "Task restored successfully.", true));
+    }
+
+    // ==========================================
+    // STEP 7: Create Task Activity
+    // Group Task Only
+    // ==========================================
+
+    const activity = await TaskActivity.create({
       todo: task._id,
-      isRead: false,
+      actor: req.user.userId,
+      targetUser: null,
+
+      type: "TASK_RESTORED",
+
+      message: `${req.user.name} restored the task.`,
+
+      metadata: {
+        extra: {
+          action: "RESTORE",
+        },
+      },
     });
 
-    req.io
-      .to(`user:${req.user.userId.toString()}`)
-      .emit("notification", notification);
+    // ==========================================
+    // STEP 8: Get Group Members
+    // ==========================================
 
-    //STEP:5 RETURN SUCCESS MESSAGE
+    const recipients = [
+      task.createdBy.toString(),
+
+      ...task.participants.map((participant) => participant.user.toString()),
+    ];
+
+    // Remove duplicates
+    // Exclude current user
+    const uniqueRecipients = [...new Set(recipients)].filter(
+      (receiverId) => receiverId !== userId
+    );
+
+    // ==========================================
+    // STEP 9: Create Notifications
+    // ==========================================
+
+    if (uniqueRecipients.length > 0) {
+      const notifications = uniqueRecipients.map((receiverId) => ({
+        user: receiverId,
+        sender: req.user.userId,
+        todo: task._id,
+
+        type: "TASK_RESTORED",
+
+        title: "Task Restored",
+
+        message: `${req.user.name} restored the task "${task.title}".`,
+
+        isRead: false,
+      }));
+
+      await Notification.insertMany(notifications);
+    }
+
+    // ==========================================
+    // STEP 10: Emit Activity
+    // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("task:activity", activity);
+
+    // ==========================================
+    // STEP 11: Emit Restore Event
+    // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("task:restored", {
+      taskId: task._id,
+
+      restoredBy: {
+        _id: req.user.userId,
+        name: req.user.name,
+      },
+    });
+
+    // ==========================================
+    // STEP 12: Response
+    // ==========================================
+
     return res
       .status(200)
-      .json(new ApiResponse(200, task, "Restore Task Success", true));
+      .json(new ApiResponse(200, task, "Task restored successfully.", true));
   } catch (error) {
+    console.error("Restore Todo Error:", error);
+
     return res
       .status(500)
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-const restoreArchiveGroupTodo = async (req, res) => {
+const restoreArchivedTodo = async (req, res) => {
   try {
-    //STEP:1 GET THE ID FROM PARAMS
+    // ==========================================
+    // STEP 1: Get Task ID
+    // ==========================================
+
     const { id } = req.params;
 
-    //STEP:2 VALIDATE TEH ID
+    // ==========================================
+    // STEP 2: Validate Task ID
+    // ==========================================
+
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res
         .status(400)
-        .json(new ApiResponse(400, null, "Task ID Invalid", false));
+        .json(new ApiResponse(400, null, "Invalid task ID", false));
     }
 
-    //STEP:3 FIND THE DELTED TASK
+    // ==========================================
+    // STEP 3: Find Archived Task
+    // Only owner can restore
+    // ==========================================
+
     const task = await Todo.findOne({
       _id: id,
       createdBy: req.user.userId,
@@ -828,35 +1469,130 @@ const restoreArchiveGroupTodo = async (req, res) => {
       isArchived: true,
     });
 
-    //STEP:3 CHECK THE TASKS IS GET OR NOT
     if (!task) {
       return res
         .status(404)
-        .json(new ApiResponse(404, null, "Task not found", false));
+        .json(new ApiResponse(404, null, "Archived task not found", false));
     }
+
+    const userId = req.user.userId.toString();
+
+    // ==========================================
+    // STEP 4: Determine Task Type
+    // ==========================================
+
+    const isGroupTask = task.participants?.length > 0;
+
+    // ==========================================
+    // STEP 5: Restore Archived Task
+    // ==========================================
+
     task.isArchived = false;
+    task.archivedAt = null;
+
     await task.save();
 
-    //STEP:5 CREATE NOTIFICATION
-    const notification = await Notification.create({
-      user: req.user.userId,
-      sender: req.user.userId,
-      type: "TASK_RESTORE",
-      title: "Task restored",
-      message: "Task restored successfully",
+    // ==========================================
+    // STEP 6: Personal Task
+    // No Activity
+    // No Notification
+    // No Socket
+    // ==========================================
+
+    if (!isGroupTask) {
+      return res
+        .status(200)
+        .json(new ApiResponse(200, task, "Task restored successfully.", true));
+    }
+
+    // ==========================================
+    // STEP 7: Create Task Activity
+    // Group Task Only
+    // ==========================================
+
+    const activity = await TaskActivity.create({
       todo: task._id,
-      isRead: false,
+      actor: req.user.userId,
+      targetUser: null,
+
+      type: "TASK_RESTORED",
+
+      message: `${req.user.name} restored the archived task.`,
+
+      metadata: {
+        extra: {
+          action: "RESTORE_ARCHIVED_TASK",
+        },
+      },
     });
 
-    req.io
-      .to(`user:${req.user.userId.toString()}`)
-      .emit("notification", notification);
+    // ==========================================
+    // STEP 8: Get Group Members
+    // ==========================================
 
-    //STEP:5 RETURN SUCCESS MESSAGE
+    const recipients = [
+      task.createdBy.toString(),
+
+      ...task.participants.map((participant) => participant.user.toString()),
+    ];
+
+    // Remove duplicates
+    // Exclude current user
+    const uniqueRecipients = [...new Set(recipients)].filter(
+      (receiverId) => receiverId !== userId
+    );
+
+    // ==========================================
+    // STEP 9: Create Notifications
+    // ==========================================
+
+    if (uniqueRecipients.length > 0) {
+      const notifications = uniqueRecipients.map((receiverId) => ({
+        user: receiverId,
+        sender: req.user.userId,
+        todo: task._id,
+
+        type: "TASK_RESTORED",
+
+        title: "Task Restored",
+
+        message: `${req.user.name} restored the task "${task.title}".`,
+
+        isRead: false,
+      }));
+
+      await Notification.insertMany(notifications);
+    }
+
+    // ==========================================
+    // STEP 10: Emit Activity
+    // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("task:activity", activity);
+
+    // ==========================================
+    // STEP 11: Emit Restore Event
+    // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("task:restored", {
+      taskId: task._id,
+
+      restoredBy: {
+        _id: req.user.userId,
+        name: req.user.name,
+      },
+    });
+
+    // ==========================================
+    // STEP 12: Response
+    // ==========================================
+
     return res
       .status(200)
-      .json(new ApiResponse(200, task, "Restore Task Success", true));
+      .json(new ApiResponse(200, task, "Task restored successfully.", true));
   } catch (error) {
+    console.error("Restore Archived Todo Error:", error);
+
     return res
       .status(500)
       .json(new ApiResponse(500, null, error.message, false));
@@ -869,51 +1605,76 @@ const shareGroupTodo = async (req, res) => {
     const { id } = req.params;
     const { email, role } = req.body;
 
+    // ==========================================
+    // STEP 1: Validate Input
+    // ==========================================
+
     if (!email) {
       return res
         .status(400)
         .json(new ApiResponse(400, null, "Email is required", false));
     }
 
-    //STEP:1 VALIDATE THE ID
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res
-        .status(409)
-        .json(new ApiResponse(409, null, "Id is not valid", false));
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task ID", false));
     }
 
-    //STEP:2 FIND TASK
+    // ==========================================
+    // STEP 2: Validate Role
+    // ==========================================
+
+    const allowedRoles = ["editor", "contributor", "viewer"];
+
+    if (!role || !allowedRoles.includes(role)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid participant role", false));
+    }
+
+    // ==========================================
+    // STEP 3: Find Task
+    // ==========================================
+
     const task = await Todo.findOne({
       _id: id,
       isDeleted: false,
       isArchived: false,
     }).populate("participants.user", "name email profileImage");
 
-    //STEP:3 CHECK THE TASK IS FOUND OR NOT
     if (!task) {
-      return res.status(404).json(404, null, "Task not found", false);
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
     }
 
-    const participant = task.participants.find(
-      (p) => p.user.toString() === req.user.userId.toString()
-    );
+    // ==========================================
+    // STEP 4: Check Owner
+    // ==========================================
 
-    if (!participant) {
+    const userId = req.user.userId.toString();
+
+    if (task.createdBy.toString() !== userId) {
       return res
         .status(403)
-        .json(new ApiResponse(403, null, "Access denied", false));
+        .json(
+          new ApiResponse(
+            403,
+            null,
+            "Only the task owner can invite members.",
+            false
+          )
+        );
     }
 
-    if (participant.role !== "owner") {
-      return res
-        .status(403)
-        .json(new ApiResponse(403, null, "Access denied", false));
-    }
+    // ==========================================
+    // STEP 5: Find Invited User
+    // ==========================================
 
-    //STEP:4 FIND INVITED USERS
     const user = await User.findOne({
-      email,
-    });
+      email: email.trim().toLowerCase(),
+    }).select("_id name email profileImage");
 
     if (!user) {
       return res
@@ -921,14 +1682,20 @@ const shareGroupTodo = async (req, res) => {
         .json(new ApiResponse(404, null, "User not found", false));
     }
 
-    //CEHCK SELF INVITED NOT ALLOWED
-    if (user._id.equals(req.user.userId)) {
+    // ==========================================
+    // STEP 6: Prevent Self Invitation
+    // ==========================================
+
+    if (user._id.toString() === userId) {
       return res
-        .status(403)
-        .json(new ApiResponse(403, null, "Cannot shared yourSelf", false));
+        .status(400)
+        .json(new ApiResponse(400, null, "You cannot invite yourself.", false));
     }
 
-    //STEP:4 CEHCK THE INVITED USER IS FREIND OR NOT
+    // ==========================================
+    // STEP 7: Check Friendship
+    // ==========================================
+
     const isFriend = await User.exists({
       _id: req.user.userId,
       friends: user._id,
@@ -936,95 +1703,153 @@ const shareGroupTodo = async (req, res) => {
 
     if (!isFriend) {
       return res
-        .status(404)
-        .json(new ApiResponse(404, null, "User is not in freind list", false));
+        .status(403)
+        .json(
+          new ApiResponse(403, null, "User is not in your friend list.", false)
+        );
     }
 
-    //STEP:4 CHECK FREINDS LIST FOR ALREADY MEMBER OF TASK
+    // ==========================================
+    // STEP 8: Check Existing Member
+    // ==========================================
+
     const alreadyMember = task.participants.some(
-      (p) => p.user.toString() === user._id.toString()
+      (participant) => participant.user?._id?.toString() === user._id.toString()
     );
 
     if (alreadyMember) {
       return res
-        .status(403)
-        .json(new ApiResponse(403, null, "User already member", false));
+        .status(409)
+        .json(
+          new ApiResponse(
+            409,
+            null,
+            "User is already a member of this task.",
+            false
+          )
+        );
     }
 
-    //STEP:5 CHECK EXISTING PENDING INVITATION
+    // ==========================================
+    // STEP 9: Check Existing Pending Invite
+    // ==========================================
+
     const pendingInvite = await Invite.findOne({
-      todo: id,
+      todo: task._id,
       invitedUser: user._id,
       status: "PENDING",
     });
 
     if (pendingInvite) {
       return res
-        .status(403)
-        .json(new ApiResponse(403, null, "Already Invited", false));
+        .status(409)
+        .json(
+          new ApiResponse(
+            409,
+            null,
+            "User already has a pending invitation.",
+            false
+          )
+        );
     }
 
-    // ==========================
-    // START TRANSACTION
-    // ==========================
+    // ==========================================
+    // STEP 10: Transaction
+    // ==========================================
 
     let invite;
     let notification;
+    let activity;
     let message;
 
     await session.withTransaction(async () => {
-      // all database writes here
+      // ------------------------------------------
+      // Create Invitation
+      // ------------------------------------------
 
-      //STEP:6 CREATE INVITATION
-      invite = await Invite.create(
-        {
-          todo: id,
-          invitedBy: req.user.userId,
-          invitedUser: user._id,
-          role,
-        },
+      [invite] = await Invite.create(
+        [
+          {
+            todo: task._id,
+            invitedBy: req.user.userId,
+            invitedUser: user._id,
+            role,
+            status: "PENDING",
+          },
+        ],
         { session }
       );
 
-      //STEP:7 CREATE NOTIFICATION
-      notification = await Notification.create(
-        {
-          user: user._id,
-          sender: req.user.userId,
-          type: "TASK_INVITE",
-          title: "Task Invitation",
-          message: "send inivitation to joined the task",
-          todo: task._id,
-          invite: invite._id,
-          isRead: false,
-        },
+      // ------------------------------------------
+      // Create Notification
+      // ------------------------------------------
+
+      [notification] = await Notification.create(
+        [
+          {
+            user: user._id,
+            sender: req.user.userId,
+            type: "TASK_INVITE",
+            title: "Task Invitation",
+            message: `${req.user.name} invited you to join "${task.title}" as ${role}.`,
+            todo: task._id,
+            invite: invite._id,
+            isRead: false,
+          },
+        ],
         { session }
       );
 
-      //STEP:8 CREATE CHATE MESSAGE
-      message = await Message.create(
-        {
-          sender: req.user.userId,
+      // ------------------------------------------
+      // Create Task Activity
+      // ------------------------------------------
 
-          type: "TASK_INVITE",
+      [activity] = await TaskActivity.create(
+        [
+          {
+            todo: task._id,
+            actor: req.user.userId,
+            targetUser: user._id,
 
-          invite: invite._id,
+            type: "MEMBER_INVITED",
 
-          todo: id,
+            message: `${req.user.name} invited ${user.name} to join the task as ${role}.`,
 
-          content: `${req.user.name} invited ${user.name} as ${role}`,
-        },
+            metadata: {
+              extra: {
+                role,
+                invitedUserId: user._id,
+                inviteId: invite._id,
+              },
+            },
+          },
+        ],
+        { session }
+      );
+
+      // ------------------------------------------
+      // Create Chat Message
+      // ------------------------------------------
+
+      [message] = await Message.create(
+        [
+          {
+            sender: req.user.userId,
+            type: "TASK_INVITE",
+            invite: invite._id,
+            todo: task._id,
+            content: `${req.user.name} invited ${user.name} as ${role}.`,
+          },
+        ],
         { session }
       );
     });
 
-    // ==========================
-    // SOCKET EVENTS
-    // Emit AFTER commit
-    // ==========================
+    // ==========================================
+    // STEP 11: Emit Notification to Invited User
+    // ==========================================
 
-    //STEP:9 EMIT NOTIFICATION  SOCKET EVENT
-    io.to(user._id.toString()).emit("notification", {
+    req.io.to(`user:${user._id.toString()}`).emit("notification", {
       type: "TASK_INVITE",
 
       notification: {
@@ -1042,8 +1867,11 @@ const shareGroupTodo = async (req, res) => {
       },
     });
 
-    //STEP:10 EMIT INVITE SOCKET EVENT
-    io.to(user._id.toString()).emit("invite:new", {
+    // ==========================================
+    // STEP 12: Emit New Invitation
+    // ==========================================
+
+    req.io.to(`user:${user._id.toString()}`).emit("invite:new", {
       invite: {
         _id: invite._id,
         role: invite.role,
@@ -1062,8 +1890,17 @@ const shareGroupTodo = async (req, res) => {
       },
     });
 
-    //STEP:11 EMIT MEMBAR  ADDED SOCKET EVENT
-    io.to(task._id.toString()).emit("task:updated", {
+    // ==========================================
+    // STEP 13: Emit Activity to Existing Members
+    // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("task:activity", activity);
+
+    // ==========================================
+    // STEP 14: Emit Task Update
+    // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("task:updated", {
       action: "MEMBER_INVITED",
 
       taskId: task._id,
@@ -1071,8 +1908,8 @@ const shareGroupTodo = async (req, res) => {
       participant: {
         _id: user._id,
         name: user.name,
-        email: user.email.trim().toLowerCase(),
-        role: role,
+        email: user.email,
+        role,
       },
 
       invitedBy: {
@@ -1081,43 +1918,50 @@ const shareGroupTodo = async (req, res) => {
       },
     });
 
-    //STEP:12 EMIT MESSAGE SOCKET EVENT
-    io.to(task._id.toString()).emit("message:new", {
+    // ==========================================
+    // STEP 15: Emit Chat Message
+    // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("message:new", {
       message: {
         _id: message._id,
         type: message.type,
         content: message.content,
+
         sender: {
           _id: req.user.userId,
           name: req.user.name,
           profileImage: req.user.profileImage,
         },
+
         createdAt: message.createdAt,
       },
     });
 
-    //STEP:13 RETURN SUCCESS MESSAGE AND DATA
+    // ==========================================
+    // STEP 16: Response
+    // ==========================================
+
     return res.status(201).json(
       new ApiResponse(
         201,
-
         {
           invite,
-
           notification,
+          activity,
         },
-
-        "Invitation sent successfully",
-
+        "Invitation sent successfully.",
         true
       )
     );
   } catch (error) {
+    console.error("Share Group Todo Error:", error);
+
     return res
       .status(500)
       .json(new ApiResponse(500, null, error.message, false));
   } finally {
-    session.endSession();
+    await session.endSession();
   }
 };
 const getGroupMembers = async (req, res) => {
@@ -1158,16 +2002,15 @@ const getGroupMembers = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-
-//TO BE CONTINUE TO SEND NOTIFICATION FROM HERE
 const updateMemberRole = async (req, res) => {
   try {
     const { id, memberId } = req.params;
     const { role } = req.body;
 
     // ==========================================
-    // STEP 1: VALIDATE IDS
+    // STEP 1: Validate IDs
     // ==========================================
+
     if (
       !mongoose.Types.ObjectId.isValid(id) ||
       !mongoose.Types.ObjectId.isValid(memberId)
@@ -1175,32 +2018,32 @@ const updateMemberRole = async (req, res) => {
       return res
         .status(400)
         .json(
-          new ApiResponse(400, null, "Invalid task id or member id", false)
+          new ApiResponse(400, null, "Invalid task ID or member ID", false)
         );
     }
 
     // ==========================================
-    // STEP 2: VALIDATE ROLE
+    // STEP 2: Validate Role
     // ==========================================
-    const allowedRoles = ["viewer", "contributor", "editor", "owner"];
 
-    if (!allowedRoles.includes(role)) {
+    const allowedRoles = ["viewer", "contributor", "editor"];
+
+    if (!role || !allowedRoles.includes(role)) {
       return res
         .status(400)
-        .json(new ApiResponse(400, null, "Invalid role", false));
+        .json(new ApiResponse(400, null, "Invalid member role", false));
     }
 
     // ==========================================
-    // STEP 3: FIND TASK
+    // STEP 3: Find Task
+    // Only Owner Can Change Roles
     // ==========================================
+
     const task = await Todo.findOne({
       _id: id,
       createdBy: req.user.userId,
       isDeleted: false,
       isArchived: false,
-    }).populate({
-      path: "participants",
-      select: "user role",
     });
 
     if (!task) {
@@ -1210,66 +2053,143 @@ const updateMemberRole = async (req, res) => {
     }
 
     // ==========================================
-    // STEP 4: FIND MEMBER
+    // STEP 4: Find Member
     // ==========================================
+
     const member = task.participants.find(
-      (participant) => participant.user.toString() === memberId
+      (participant) => participant.user.toString() === memberId.toString()
     );
 
     if (!member) {
       return res
         .status(404)
-        .json(new ApiResponse(404, null, "Member not found", false));
+        .json(
+          new ApiResponse(404, null, "Member not found in this task", false)
+        );
     }
 
     // ==========================================
-    // STEP 5: UPDATE ROLE
+    // STEP 5: Prevent Duplicate Role Update
     // ==========================================
+
     const oldRole = member.role;
+
+    if (oldRole === role) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, `Member is already a ${role}.`, false)
+        );
+    }
+
+    // ==========================================
+    // STEP 6: Update Role
+    // ==========================================
 
     member.role = role;
 
     await task.save();
 
     // ==========================================
-    // STEP 6: CREATE NOTIFICATION
+    // STEP 7: Create Task Activity
     // ==========================================
-    const notification = await Notification.create({
-      user: memberId, // RECIPIENT
-      sender: req.user.userId, // OWNER
-      type: "TASK_ROLE_CHANGED",
-      title: "Task Role Changed",
-      message: `Your role on "${task.title}" has been changed from ${oldRole} to ${role}.`,
+
+    const activity = await TaskActivity.create({
       todo: task._id,
+      actor: req.user.userId,
+      targetUser: memberId,
+
+      type: "ROLE_CHANGED",
+
+      message: `${req.user.name} changed ${memberId}'s role from ${oldRole} to ${role}.`,
+
+      metadata: {
+        oldValue: oldRole,
+        newValue: role,
+
+        extra: {
+          memberId,
+        },
+      },
+    });
+
+    // ==========================================
+    // STEP 8: Create Notification
+    // ==========================================
+
+    const notification = await Notification.create({
+      user: memberId,
+      sender: req.user.userId,
+
+      type: "TASK_ROLE_CHANGED",
+
+      title: "Task Role Changed",
+
+      message: `Your role on "${task.title}" has been changed from ${oldRole} to ${role}.`,
+
+      todo: task._id,
+
       isRead: false,
     });
 
     // ==========================================
-    // STEP 7: EMIT REAL-TIME NOTIFICATION
+    // STEP 9: Emit Notification
     // ==========================================
-    io.to(`user:${memberId}`).emit("notification:new", notification);
+
+    req.io.to(`user:${memberId.toString()}`).emit("notification", notification);
 
     // ==========================================
-    // STEP 8: RESPONSE
+    // STEP 10: Emit Activity
     // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("task:activity", activity);
+
+    // ==========================================
+    // STEP 11: Emit Task Update
+    // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("task:member-role-updated", {
+      taskId: task._id,
+
+      member: {
+        userId: memberId,
+        oldRole,
+        newRole: role,
+      },
+
+      updatedBy: {
+        _id: req.user.userId,
+        name: req.user.name,
+      },
+    });
+
+    // ==========================================
+    // STEP 12: Response
+    // ==========================================
+
     return res
       .status(200)
       .json(
-        new ApiResponse(200, task, "Member role updated successfully", true)
+        new ApiResponse(200, task, "Member role updated successfully.", true)
       );
   } catch (error) {
+    console.error("Update Member Role Error:", error);
+
     return res
       .status(500)
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
 const removeMember = async (req, res) => {
+  const session = await mongoose.startSession();
+
   try {
     const { id, memberId } = req.params;
 
     // ==========================================
-    // STEP 1: VALIDATE IDS
+    // STEP 1: Validate IDs
     // ==========================================
+
     if (
       !mongoose.Types.ObjectId.isValid(id) ||
       !mongoose.Types.ObjectId.isValid(memberId)
@@ -1277,13 +2197,17 @@ const removeMember = async (req, res) => {
       return res
         .status(400)
         .json(
-          new ApiResponse(400, null, "Invalid task id or member id", false)
+          new ApiResponse(400, null, "Invalid task ID or member ID", false)
         );
     }
 
+    const userId = req.user.userId.toString();
+
     // ==========================================
-    // STEP 2: FIND TASK
+    // STEP 2: Find Task
+    // Only owner can remove members
     // ==========================================
+
     const task = await Todo.findOne({
       _id: id,
       createdBy: req.user.userId,
@@ -1298,89 +2222,197 @@ const removeMember = async (req, res) => {
     }
 
     // ==========================================
-    // STEP 3: FIND MEMBER
+    // STEP 3: Find Member
     // ==========================================
+
     const member = task.participants.find(
-      (participant) => participant.user.toString() === memberId
+      (participant) => participant.user.toString() === memberId.toString()
     );
 
     if (!member) {
       return res
         .status(404)
-        .json(new ApiResponse(404, null, "Not a member of this task", false));
-    }
-
-    // ==========================================
-    // STEP 4: OWNER PROTECTION
-    // ==========================================
-    if (member.role === "owner") {
-      return res
-        .status(400)
         .json(
-          new ApiResponse(400, null, "Cannot remove owner from task", false)
+          new ApiResponse(404, null, "User is not a member of this task", false)
         );
     }
 
     // ==========================================
-    // STEP 5: REMOVE MEMBER
+    // STEP 4: Prevent Owner Removal
     // ==========================================
-    const updatedTask = await Todo.findOneAndUpdate(
-      {
-        _id: id,
-        createdBy: req.user.userId,
-        isDeleted: false,
-        isArchived: false,
-      },
-      {
-        $pull: {
-          participants: {
-            user: memberId,
-          },
-        },
-      },
-      {
-        new: true,
-      }
-    );
 
-    if (!updatedTask) {
+    if (member.role === "owner") {
       return res
-        .status(404)
-        .json(new ApiResponse(404, null, "Task could not be updated", false));
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "The task owner cannot be removed.", false)
+        );
     }
 
     // ==========================================
-    // STEP 6: CREATE NOTIFICATION
+    // STEP 5: Prevent Self Removal
     // ==========================================
-    const notification = await Notification.create({
-      user: memberId,
-      sender: req.user.userId,
-      type: "MEMBER_REMOVED",
-      title: "Removed from task",
-      message: `You have been removed from "${task.title}".`,
-      todo: task._id,
-      isRead: false,
+
+    if (memberId.toString() === userId) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "You cannot remove yourself. Use leave task instead.",
+            false
+          )
+        );
+    }
+
+    // ==========================================
+    // STEP 6: Get Old Role
+    // ==========================================
+
+    const removedRole = member.role;
+
+    let updatedTask;
+    let activity;
+    let notification;
+
+    // ==========================================
+    // STEP 7: Transaction
+    // ==========================================
+
+    await session.withTransaction(async () => {
+      // ------------------------------------------
+      // Remove Member
+      // ------------------------------------------
+
+      updatedTask = await Todo.findOneAndUpdate(
+        {
+          _id: id,
+          createdBy: req.user.userId,
+          isDeleted: false,
+          isArchived: false,
+        },
+        {
+          $pull: {
+            participants: {
+              user: memberId,
+            },
+          },
+        },
+        {
+          new: true,
+          session,
+        }
+      );
+
+      if (!updatedTask) {
+        throw new Error("Task could not be updated.");
+      }
+
+      // ------------------------------------------
+      // Create Task Activity
+      // ------------------------------------------
+
+      [activity] = await TaskActivity.create(
+        [
+          {
+            todo: task._id,
+            actor: req.user.userId,
+            targetUser: memberId,
+
+            type: "MEMBER_REMOVED",
+
+            message: `${req.user.name} removed a member from the task.`,
+
+            metadata: {
+              oldValue: removedRole,
+
+              extra: {
+                removedUserId: memberId,
+                removedRole,
+              },
+            },
+          },
+        ],
+        { session }
+      );
+
+      // ------------------------------------------
+      // Create Notification
+      // ------------------------------------------
+
+      [notification] = await Notification.create(
+        [
+          {
+            user: memberId,
+            sender: req.user.userId,
+
+            type: "MEMBER_REMOVED",
+
+            title: "Removed from task",
+
+            message: `You have been removed from "${task.title}".`,
+
+            todo: task._id,
+
+            isRead: false,
+          },
+        ],
+        { session }
+      );
     });
 
     // ==========================================
-    // STEP 7: SEND REAL-TIME NOTIFICATION
+    // STEP 8: Notify Removed Member
     // ==========================================
-    io.to(`user:${memberId}`).emit("notification:new", notification);
+
+    req.io.to(`user:${memberId.toString()}`).emit("notification", notification);
 
     // ==========================================
-    // STEP 8: RESPONSE
+    // STEP 9: Emit Activity
     // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("task:activity", activity);
+
+    // ==========================================
+    // STEP 10: Emit Member Removed Event
+    // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("task:member-removed", {
+      taskId: task._id,
+
+      member: {
+        userId: memberId,
+        role: removedRole,
+      },
+
+      removedBy: {
+        _id: req.user.userId,
+        name: req.user.name,
+      },
+    });
+
+    // ==========================================
+    // STEP 11: Response
+    // ==========================================
+
     return res
       .status(200)
       .json(
-        new ApiResponse(200, updatedTask, "Member removed successfully", true)
+        new ApiResponse(200, updatedTask, "Member removed successfully.", true)
       );
   } catch (error) {
+    console.error("Remove Member Error:", error);
+
     return res
       .status(500)
       .json(new ApiResponse(500, null, error.message, false));
+  } finally {
+    await session.endSession();
   }
 };
+
+//TO BE CONTINUE TO ADDED TASK_AKTIVITY AND NOTIFICATION LOGIC AND SOCKET LOGIC
 const leaveGroupTodo = async (req, res) => {
   try {
     const { id } = req.params;
