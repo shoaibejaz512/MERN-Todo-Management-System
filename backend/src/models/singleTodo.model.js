@@ -41,8 +41,8 @@ const todoSchema = new mongoose.Schema(
         },
         role: {
           type: String,
-          enum: ["viewer", "contributor", "editor"],
-          default: "viewer",
+          enum: ["viewer", "contributor", "editor", "owner"],
+          default: "owner",
         },
         addedAt: {
           type: Date,
@@ -94,10 +94,31 @@ const todoSchema = new mongoose.Schema(
       },
       default: "START",
     },
+    taskInvitations: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Invite",
+      },
+    ],
+    comments: [
+      {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "Comment",
+      },
+    ],
   },
   {
     timestamps: true,
   }
 );
+
+
+// Indexes
+SingleTodo.index({ createdBy: 1 });
+SingleTodo.index({ "participants.user": 1 });
+SingleTodo.index({ status: 1 });
+SingleTodo.index({ isArchived: 1 });
+SingleTodo.index({ isDeleted: 1 });
+
 
 export const SingleTodo = mongoose.model("SingleTodo", todoSchema);

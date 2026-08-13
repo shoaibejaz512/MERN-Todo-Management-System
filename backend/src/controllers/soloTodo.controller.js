@@ -3,15 +3,17 @@ import ApiResponse from "../utils/apiResponseHandler.js";
 import todoAIService from "../service/ai.service.js";
 import mongoose from "mongoose";
 import { User } from "../models/user.model.js";
+import { Notification } from "../models/notification.model.js";
+import { TaskActivity } from "../models/taskactivity.model.js";
 
 // controllers/todo.controller.js
 
 export const createSoloTodo = async (req, res) => {
+  const session = await mongoose.startSession();
+
   try {
     const { title, description, priority, estimatedHours, deadline, tags } =
       req.body;
-
-    console.log(req.body);
 
     if (!title || !description || !deadline) {
       return res
@@ -20,30 +22,109 @@ export const createSoloTodo = async (req, res) => {
           new ApiResponse(
             400,
             null,
-            "Title and description and deadline are required",
+            "Title, description and deadline are required",
             false
           )
         );
     }
 
-    const todo = await SingleTodo.create({
-      title,
-      description,
-      priority,
-      estimatedHours,
-      deadline,
-      tags,
-      createdBy: req.user.userId,
-      source: "manual", // only if you added this field
+    const userId = req.user.userId;
+
+    let todo;
+    let user;
+    let notification;
+
+    await session.withTransaction(async () => {
+      // ==========================================
+      // STEP 1: CREATE TODO
+      // ==========================================
+      todo = await SingleTodo.create(
+        {
+          title,
+          description,
+          priority,
+          estimatedHours,
+          deadline,
+          tags,
+          createdBy: userId,
+          source: "manual",
+
+          participants: [
+            {
+              user: userId,
+              role: "owner",
+            },
+          ],
+        },
+        { session }
+      );
+
+      // ==========================================
+      // STEP 2: CREATE TASK ACTIVITY
+      // ==========================================
+      await TaskActivity.create(
+        [
+          {
+            todo: todo._id,
+            actor: userId,
+            targetUser: null,
+            type: "TASK_CREATED",
+            message: "A new task was created.",
+            metadata: {
+              extra: {
+                title: todo.title,
+                source: todo.source,
+              },
+            },
+          },
+        ],
+        { session }
+      );
+
+      // ==========================================
+      // STEP 3: CREATE NOTIFICATION
+      // ==========================================
+      notification = await Notification.create(
+        {
+          user: userId,
+          sender: userId,
+          type: "TASK_CREATED",
+          title: "Task Created",
+          message: "You have created a new task",
+          todo: todo._id,
+          isRead: false,
+        },
+        { session }
+      );
+
+      // ==========================================
+      // STEP 4: UPDATE USER
+      // ==========================================
+      user = await User.findByIdAndUpdate(
+        userId,
+        {
+          $addToSet: {
+            singleTasks: todo._id,
+          },
+        },
+        {
+          new: true,
+          session,
+        }
+      );
+
+      // ==========================================
+      // STEP 5: CHECK USER
+      // ==========================================
+      if (!user) {
+        throw new Error("User not found");
+      }
     });
 
-    //UPDATE THE THE USER MODEL IN DATABASE WITH THE CREATED TODO ID
-    const userId = req.user.userId;
-    const user = await User.findById(userId);
-    if (user) {
-      user.singleTasks.push(todo._id);
-      await user.save();
-    }
+    // ==========================================
+    // STEP 6: EMIT SOCKET EVENT
+    // ==========================================
+    io.to(`user:${userId.toString()}`).emit("notification", notification);
 
     return res
       .status(201)
@@ -52,9 +133,10 @@ export const createSoloTodo = async (req, res) => {
     return res
       .status(500)
       .json(new ApiResponse(500, null, error.message, false));
+  } finally {
+    await session.endSession();
   }
 };
-
 export const generateAITodo = async (req, res) => {
   try {
     const { prompt } = req.body;
