@@ -160,10 +160,17 @@ export const generateAITodo = async (req, res) => {
 };
 
 export const saveAITodo = async (req, res) => {
+  // Start a MongoDB session so all related DB operations
+  // can be committed or rolled back together.
+  const session = await mongoose.startSession();
+
   try {
     const { title, description, priority, estimatedHours, deadline, tags } =
       req.body;
 
+    // -----------------------------------------
+    // 1. Validate required fields
+    // -----------------------------------------
     if (!title || !description) {
       return res
         .status(400)
@@ -177,32 +184,178 @@ export const saveAITodo = async (req, res) => {
         );
     }
 
-    const todo = await SingleTodo.create({
-      title,
-      description,
-      priority,
-      estimatedHours,
-      deadline,
-      tags,
-      createdBy: req.user.userId,
-      source: "ai", // only if you added this field
+    const userId = req.user.userId;
+
+    // These variables will hold the documents
+    // created inside the transaction.
+    let todo;
+    let activity;
+    let notification;
+
+    // -----------------------------------------
+    // 2. Start transaction
+    // -----------------------------------------
+    await session.withTransaction(async () => {
+      // -----------------------------------------
+      // 3. Create AI Todo
+      // -----------------------------------------
+      todo = await SingleTodo.create(
+        [
+          {
+            title,
+            description,
+            priority,
+            estimatedHours,
+            deadline,
+            tags,
+            createdBy: userId,
+
+            // This identifies that the task
+            // was generated/saved through AI.
+            source: "ai",
+          },
+        ],
+        { session }
+      );
+
+      // create() with an array returns an array
+      // when used with a session.
+      todo = todo[0];
+
+      if (!todo) {
+        throw new Error("Failed to save AI Todo");
+      }
+
+      // -----------------------------------------
+      // 4. Add Todo reference to User
+      // -----------------------------------------
+      const user = await User.findByIdAndUpdate(
+        userId,
+        {
+          $addToSet: {
+            singleTasks: todo._id,
+          },
+        },
+        {
+          new: true,
+          session,
+        }
+      );
+
+      if (!user) {
+        throw new Error("User not found");
+      }
+
+      // -----------------------------------------
+      // 5. Create task activity
+      // -----------------------------------------
+      const activityResult = await TaskActivity.create(
+        [
+          {
+            todo: todo._id,
+            actor: userId,
+            targetUser: null,
+
+            type: "TASK_CREATED",
+
+            message: "A new AI task was created.",
+
+            metadata: {
+              extra: {
+                title: todo.title,
+                source: todo.source,
+              },
+            },
+          },
+        ],
+        { session }
+      );
+
+      // create() returns an array when passed
+      // an array of documents.
+      activity = activityResult[0];
+
+      if (!activity) {
+        throw new Error("Failed to create task activity");
+      }
+
+      // -----------------------------------------
+      // 6. Create notification
+      // -----------------------------------------
+      const notificationResult = await Notification.create(
+        [
+          {
+            user: userId,
+            sender: userId,
+
+            type: "TASK_CREATED",
+
+            title: "AI Task Created",
+
+            message: "You have created a new AI task.",
+
+            todo: todo._id,
+
+            isRead: false,
+          },
+        ],
+        { session }
+      );
+
+      notification = notificationResult[0];
+
+      if (!notification) {
+        throw new Error("Failed to create notification");
+      }
+
+      // -----------------------------------------
+      // IMPORTANT:
+      // Do NOT emit Socket.io events here.
+      //
+      // The transaction may still rollback.
+      // We emit events only after the transaction
+      // successfully commits.
+      // -----------------------------------------
     });
 
-    //UPDATE THE THE USER MODEL IN DATABASE WITH THE CREATED TODO ID
-    const userId = req.user.userId;
-    const user = await User.findById(userId);
-    if (user) {
-      user.singleTasks.push(todo._id);
-      await user.save();
-    }
+    // -----------------------------------------
+    // 7. Transaction successfully committed
+    // -----------------------------------------
 
+    // Send real-time task activity to the user
+    // only after the database transaction succeeds.
+    io.to(`user:${userId.toString()}`).emit("taskActivity", activity);
+
+    // Send real-time notification to the user.
+    io.to(`user:${userId.toString()}`).emit("notification", notification);
+
+    // -----------------------------------------
+    // 8. Send successful response
+    // -----------------------------------------
     return res
       .status(201)
       .json(new ApiResponse(201, todo, "AI Todo saved successfully", true));
   } catch (error) {
+    // -----------------------------------------
+    // Transaction will automatically rollback
+    // if an error is thrown inside withTransaction.
+    // -----------------------------------------
+
+    console.error("saveAITodo Error:", error);
+
     return res
       .status(500)
-      .json(new ApiResponse(500, null, error.message, false));
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          error.message || "Failed to save AI Todo",
+          false
+        )
+      );
+  } finally {
+    // Always close the MongoDB session.
+    await session.endSession();
   }
 };
 
