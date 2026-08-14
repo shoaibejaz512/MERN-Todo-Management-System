@@ -158,7 +158,6 @@ export const generateAITodo = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-
 export const saveAITodo = async (req, res) => {
   // Start a MongoDB session so all related DB operations
   // can be committed or rolled back together.
@@ -209,7 +208,12 @@ export const saveAITodo = async (req, res) => {
             deadline,
             tags,
             createdBy: userId,
-
+            participants: [
+              {
+                user: userId,
+                role: "owner",
+              },
+            ],
             // This identifies that the task
             // was generated/saved through AI.
             source: "ai",
@@ -358,8 +362,9 @@ export const saveAITodo = async (req, res) => {
     await session.endSession();
   }
 };
-
 export const updateTask = async (req, res) => {
+  const session = await mongoose.startSession();
+
   try {
     const { id } = req.params;
 
@@ -373,49 +378,464 @@ export const updateTask = async (req, res) => {
       status,
     } = req.body;
 
-    // STEP 1: Validate MongoDB ID
+    const userId = req.user.userId;
+
+    // ==========================================
+    // STEP 1: Validate MongoDB Task ID
+    // ==========================================
+
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res
         .status(400)
         .json(new ApiResponse(400, null, "Invalid task ID", false));
     }
 
-    // STEP 2: Find the task
-    const todo = await SingleTodo.findOne({
-      _id: id,
-      createdBy: req.user.userId,
-      isDeleted: false,
-      isArchived: false,
+    let todo;
+    let createdActivities = [];
+    let notifications = [];
+
+    // ==========================================
+    // STEP 2: Start MongoDB Transaction
+    // ==========================================
+
+    await session.withTransaction(async () => {
+      // ==========================================
+      // STEP 3: Find Single Todo
+      // ==========================================
+
+      todo = await SingleTodo.findOne({
+        _id: id,
+
+        // Task must not be deleted
+        isDeleted: false,
+
+        // Task must not be archived
+        isArchived: false,
+      }).session(session);
+
+      if (!todo) {
+        throw new Error("Task not found");
+      }
+
+      // ==========================================
+      // STEP 4: Find Current User's Participant Role
+      // ==========================================
+
+      const participant = todo.participants.find(
+        (participant) => participant.user.toString() === userId.toString()
+      );
+
+      // ==========================================
+      // IMPORTANT:
+      //
+      // If the task creator is not present in the
+      // participants array, treat them as owner.
+      // ==========================================
+
+      let userRole = null;
+
+      if (todo.createdBy.toString() === userId.toString()) {
+        userRole = "owner";
+      } else if (participant) {
+        userRole = participant.role;
+      }
+
+      // ==========================================
+      // STEP 5: Check Authorization
+      // ==========================================
+
+      if (!userRole) {
+        throw new Error("You are not a participant of this task");
+      }
+
+      // Viewer cannot update anything
+      if (userRole === "viewer") {
+        throw new Error("You do not have permission to update this task");
+      }
+
+      // ==========================================
+      // STEP 6: Prepare Activity Array
+      // ==========================================
+
+      const activities = [];
+
+      // ==========================================
+      // TITLE
+      // Owner + Editor can update
+      // ==========================================
+
+      if (title !== undefined && title !== todo.title) {
+        if (userRole !== "owner" && userRole !== "editor") {
+          throw new Error("You do not have permission to update the title");
+        }
+
+        activities.push({
+          todo: todo._id,
+          actor: userId,
+          targetUser: null,
+
+          type: "TITLE_UPDATED",
+
+          message: "Task title was updated.",
+
+          metadata: {
+            oldValue: todo.title,
+            newValue: title,
+          },
+        });
+
+        todo.title = title;
+      }
+
+      // ==========================================
+      // DESCRIPTION
+      // Owner + Editor can update
+      // ==========================================
+
+      if (description !== undefined && description !== todo.description) {
+        if (userRole !== "owner" && userRole !== "editor") {
+          throw new Error(
+            "You do not have permission to update the description"
+          );
+        }
+
+        activities.push({
+          todo: todo._id,
+          actor: userId,
+          targetUser: null,
+
+          type: "DESCRIPTION_UPDATED",
+
+          message: "Task description was updated.",
+
+          metadata: {
+            oldValue: todo.description,
+            newValue: description,
+          },
+        });
+
+        todo.description = description;
+      }
+
+      // ==========================================
+      // PRIORITY
+      // Owner + Editor can update
+      // ==========================================
+
+      if (priority !== undefined && priority !== todo.priority) {
+        if (userRole !== "owner" && userRole !== "editor") {
+          throw new Error("You do not have permission to update priority");
+        }
+
+        activities.push({
+          todo: todo._id,
+          actor: userId,
+          targetUser: null,
+
+          type: "PRIORITY_UPDATED",
+
+          message: "Task priority was updated.",
+
+          metadata: {
+            oldValue: todo.priority,
+            newValue: priority,
+          },
+        });
+
+        todo.priority = priority;
+      }
+
+      // ==========================================
+      // ESTIMATED HOURS
+      // Owner + Editor can update
+      // ==========================================
+
+      if (
+        estimatedHours !== undefined &&
+        estimatedHours !== todo.estimatedHours
+      ) {
+        if (userRole !== "owner" && userRole !== "editor") {
+          throw new Error(
+            "You do not have permission to update estimated hours"
+          );
+        }
+
+        activities.push({
+          todo: todo._id,
+          actor: userId,
+          targetUser: null,
+
+          type: "TASK_UPDATED",
+
+          message: "Estimated hours were updated.",
+
+          metadata: {
+            oldValue: todo.estimatedHours,
+            newValue: estimatedHours,
+          },
+        });
+
+        todo.estimatedHours = estimatedHours;
+      }
+
+      // ==========================================
+      // DEADLINE
+      // Owner + Editor can update
+      // ==========================================
+
+      if (
+        deadline !== undefined &&
+        String(deadline) !== String(todo.deadline)
+      ) {
+        if (userRole !== "owner" && userRole !== "editor") {
+          throw new Error("You do not have permission to update the deadline");
+        }
+
+        activities.push({
+          todo: todo._id,
+          actor: userId,
+          targetUser: null,
+
+          type: "DEADLINE_UPDATED",
+
+          message: "Task deadline was updated.",
+
+          metadata: {
+            oldValue: todo.deadline,
+            newValue: deadline,
+          },
+        });
+
+        todo.deadline = deadline;
+      }
+
+      // ==========================================
+      // TAGS
+      // Owner + Editor can update
+      // ==========================================
+
+      if (
+        tags !== undefined &&
+        JSON.stringify(tags) !== JSON.stringify(todo.tags)
+      ) {
+        if (userRole !== "owner" && userRole !== "editor") {
+          throw new Error("You do not have permission to update tags");
+        }
+
+        activities.push({
+          todo: todo._id,
+          actor: userId,
+          targetUser: null,
+
+          type: "TASK_UPDATED",
+
+          message: "Task tags were updated.",
+
+          metadata: {
+            oldValue: todo.tags,
+            newValue: tags,
+          },
+        });
+
+        todo.tags = tags;
+      }
+
+      // ==========================================
+      // STATUS
+      //
+      // Owner + Editor + Contributor
+      // can update task status.
+      // ==========================================
+
+      if (status !== undefined && status !== todo.status) {
+        if (
+          userRole !== "owner" &&
+          userRole !== "editor" &&
+          userRole !== "contributor"
+        ) {
+          throw new Error("You do not have permission to update task status");
+        }
+
+        activities.push({
+          todo: todo._id,
+          actor: userId,
+          targetUser: null,
+
+          type: "STATUS_UPDATED",
+
+          message: "Task status was updated.",
+
+          metadata: {
+            oldValue: todo.status,
+            newValue: status,
+          },
+        });
+
+        todo.status = status;
+      }
+
+      // ==========================================
+      // STEP 7: Check Whether Anything Changed
+      // ==========================================
+
+      if (activities.length === 0) {
+        return;
+      }
+
+      // ==========================================
+      // STEP 8: Save Updated Task
+      // ==========================================
+
+      await todo.save({ session });
+
+      // ==========================================
+      // STEP 9: Create Task Activities
+      // ==========================================
+
+      createdActivities = await TaskActivity.insertMany(activities, {
+        session,
+      });
+
+      // ==========================================
+      // STEP 10: Get Users Who Should Receive
+      // Notification
+      //
+      // We notify all participants except the
+      // person who performed the update.
+      // ==========================================
+
+      const participantIds = todo.participants
+        .map((participant) => participant.user)
+        .filter(
+          (participantId) => participantId.toString() !== userId.toString()
+        );
+
+      // ==========================================
+      // Include owner if owner is not inside
+      // participants array.
+      // ==========================================
+
+      if (
+        todo.createdBy.toString() !== userId.toString() &&
+        !participantIds.some(
+          (participantId) =>
+            participantId.toString() === todo.createdBy.toString()
+        )
+      ) {
+        participantIds.push(todo.createdBy);
+      }
+
+      // ==========================================
+      // STEP 11: Create Notifications
+      // ==========================================
+
+      if (participantIds.length > 0) {
+        notifications = await Notification.insertMany(
+          participantIds.map((participantId) => ({
+            user: participantId,
+            sender: userId,
+
+            type: "TASK_UPDATED",
+
+            title: "Task Updated",
+
+            message: `A task you are participating in was updated.`,
+
+            todo: todo._id,
+
+            isRead: false,
+          })),
+          { session }
+        );
+      }
     });
 
-    if (!todo) {
+    // ==========================================
+    // STEP 12: No Changes Made
+    // ==========================================
+
+    if (createdActivities.length === 0) {
       return res
-        .status(404)
-        .json(new ApiResponse(404, null, "Task not found", false));
+        .status(200)
+        .json(
+          new ApiResponse(200, todo, "No changes were made to the task.", true)
+        );
     }
 
-    // STEP 3: Update only provided fields
-    if (title !== undefined) todo.title = title;
-    if (description !== undefined) todo.description = description;
-    if (priority !== undefined) todo.priority = priority;
-    if (estimatedHours !== undefined) todo.estimatedHours = estimatedHours;
-    if (deadline !== undefined) todo.deadline = deadline;
-    if (tags !== undefined) todo.tags = tags;
-    if (status !== undefined) todo.status = status;
+    // ==========================================
+    // STEP 13: Emit Notifications
+    //
+    // IMPORTANT:
+    // Emit only after transaction commits.
+    // ==========================================
 
-    // STEP 4: Save
-    await todo.save();
+    for (const notification of notifications) {
+      io.to(`user:${notification.user.toString()}`).emit(
+        "notification",
+        notification
+      );
+    }
 
-    // STEP 5: Response
+    // ==========================================
+    // STEP 14: Emit Activities
+    //
+    // All users connected to this task room
+    // can receive the activity.
+    // ==========================================
+
+    for (const activity of createdActivities) {
+      io.to(`task:${todo._id.toString()}`).emit("task:activity", activity);
+    }
+
+    // ==========================================
+    // STEP 15: Success Response
+    // ==========================================
+
     return res
       .status(200)
-      .json(new ApiResponse(200, todo, "Task updated successfully", true));
+      .json(new ApiResponse(200, todo, "Task updated successfully.", true));
   } catch (error) {
+    console.error("updateTask Error:", error);
+
+    // ==========================================
+    // Handle Authorization / Not Found Errors
+    // ==========================================
+
+    if (
+      error.message === "Task not found" ||
+      error.message === "You are not a participant of this task"
+    ) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, error.message, false));
+    }
+
+    if (error.message.includes("permission")) {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, error.message, false));
+    }
+
+    // ==========================================
+    // Handle Other Errors
+    // ==========================================
+
     return res
       .status(500)
-      .json(new ApiResponse(500, null, error.message, false));
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          error.message || "Failed to update task",
+          false
+        )
+      );
+  } finally {
+    // Always close MongoDB session
+    await session.endSession();
   }
 };
+
 export const updateTaskStatus = async (req, res) => {
   try {
     const { id } = req.params;

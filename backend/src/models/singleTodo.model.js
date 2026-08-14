@@ -114,11 +114,10 @@ const todoSchema = new mongoose.Schema(
 
 
 // Indexes
-SingleTodo.index({ createdBy: 1 });
-SingleTodo.index({ "participants.user": 1 });
-SingleTodo.index({ status: 1 });
-SingleTodo.index({ isArchived: 1 });
-SingleTodo.index({ isDeleted: 1 });
-
+SingleTodo.index({
+  createdBy: 1,
+  isDeleted: 1,
+  isArchived: 1,
+});
 
 export const SingleTodo = mongoose.model("SingleTodo", todoSchema);
