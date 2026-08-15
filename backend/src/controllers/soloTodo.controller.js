@@ -400,16 +400,12 @@ export const updateTask = async (req, res) => {
 
     await session.withTransaction(async () => {
       // ==========================================
-      // STEP 3: Find Single Todo
+      // STEP 3: Find Task
       // ==========================================
 
       todo = await SingleTodo.findOne({
         _id: id,
-
-        // Task must not be deleted
         isDeleted: false,
-
-        // Task must not be archived
         isArchived: false,
       }).session(session);
 
@@ -418,54 +414,90 @@ export const updateTask = async (req, res) => {
       }
 
       // ==========================================
-      // STEP 4: Find Current User's Participant Role
-      // ==========================================
-
-      const participant = todo.participants.find(
-        (participant) => participant.user.toString() === userId.toString()
-      );
-
-      // ==========================================
-      // IMPORTANT:
+      // STEP 4: Determine Task Type
       //
-      // If the task creator is not present in the
-      // participants array, treat them as owner.
+      // Personal Task:
+      // participants does not exist or is empty.
+      //
+      // Collaborative Task:
+      // participants contains one or more users.
+      // ==========================================
+
+      const isCollaborative =
+        Array.isArray(todo.participants) && todo.participants.length > 0;
+
+      // ==========================================
+      // STEP 5: Find Current User Participant
+      // ==========================================
+
+      const participant = isCollaborative
+        ? todo.participants.find(
+            (participant) => participant.user.toString() === userId.toString()
+          )
+        : null;
+
+      // ==========================================
+      // STEP 6: Determine User Role
       // ==========================================
 
       let userRole = null;
 
+      // Task creator is always the owner
       if (todo.createdBy.toString() === userId.toString()) {
         userRole = "owner";
-      } else if (participant) {
+      }
+
+      // Collaborative participant
+      else if (participant) {
         userRole = participant.role;
       }
 
       // ==========================================
-      // STEP 5: Check Authorization
+      // STEP 7: Authorization
       // ==========================================
 
       if (!userRole) {
         throw new Error("You are not a participant of this task");
       }
 
-      // Viewer cannot update anything
-      if (userRole === "viewer") {
+      // ==========================================
+      // PERSONAL TASK
+      //
+      // Only owner can update personal task.
+      // ==========================================
+
+      if (!isCollaborative && userRole !== "owner") {
         throw new Error("You do not have permission to update this task");
       }
 
       // ==========================================
-      // STEP 6: Prepare Activity Array
+      // COLLABORATIVE TASK
+      //
+      // Viewer cannot update anything.
+      // ==========================================
+
+      if (isCollaborative && userRole === "viewer") {
+        throw new Error("You do not have permission to update this task");
+      }
+
+      // ==========================================
+      // STEP 8: Prepare Activities
       // ==========================================
 
       const activities = [];
 
       // ==========================================
       // TITLE
-      // Owner + Editor can update
+      //
+      // Personal:
+      // Owner
+      //
+      // Collaborative:
+      // Owner + Editor
       // ==========================================
 
       if (title !== undefined && title !== todo.title) {
-        if (userRole !== "owner" && userRole !== "editor") {
+        if (isCollaborative && userRole !== "owner" && userRole !== "editor") {
           throw new Error("You do not have permission to update the title");
         }
 
@@ -489,11 +521,16 @@ export const updateTask = async (req, res) => {
 
       // ==========================================
       // DESCRIPTION
-      // Owner + Editor can update
+      //
+      // Personal:
+      // Owner
+      //
+      // Collaborative:
+      // Owner + Editor
       // ==========================================
 
       if (description !== undefined && description !== todo.description) {
-        if (userRole !== "owner" && userRole !== "editor") {
+        if (isCollaborative && userRole !== "owner" && userRole !== "editor") {
           throw new Error(
             "You do not have permission to update the description"
           );
@@ -519,11 +556,10 @@ export const updateTask = async (req, res) => {
 
       // ==========================================
       // PRIORITY
-      // Owner + Editor can update
       // ==========================================
 
       if (priority !== undefined && priority !== todo.priority) {
-        if (userRole !== "owner" && userRole !== "editor") {
+        if (isCollaborative && userRole !== "owner" && userRole !== "editor") {
           throw new Error("You do not have permission to update priority");
         }
 
@@ -547,14 +583,13 @@ export const updateTask = async (req, res) => {
 
       // ==========================================
       // ESTIMATED HOURS
-      // Owner + Editor can update
       // ==========================================
 
       if (
         estimatedHours !== undefined &&
         estimatedHours !== todo.estimatedHours
       ) {
-        if (userRole !== "owner" && userRole !== "editor") {
+        if (isCollaborative && userRole !== "owner" && userRole !== "editor") {
           throw new Error(
             "You do not have permission to update estimated hours"
           );
@@ -580,14 +615,13 @@ export const updateTask = async (req, res) => {
 
       // ==========================================
       // DEADLINE
-      // Owner + Editor can update
       // ==========================================
 
       if (
         deadline !== undefined &&
         String(deadline) !== String(todo.deadline)
       ) {
-        if (userRole !== "owner" && userRole !== "editor") {
+        if (isCollaborative && userRole !== "owner" && userRole !== "editor") {
           throw new Error("You do not have permission to update the deadline");
         }
 
@@ -611,14 +645,13 @@ export const updateTask = async (req, res) => {
 
       // ==========================================
       // TAGS
-      // Owner + Editor can update
       // ==========================================
 
       if (
         tags !== undefined &&
         JSON.stringify(tags) !== JSON.stringify(todo.tags)
       ) {
-        if (userRole !== "owner" && userRole !== "editor") {
+        if (isCollaborative && userRole !== "owner" && userRole !== "editor") {
           throw new Error("You do not have permission to update tags");
         }
 
@@ -643,12 +676,16 @@ export const updateTask = async (req, res) => {
       // ==========================================
       // STATUS
       //
+      // Personal:
+      // Owner
+      //
+      // Collaborative:
       // Owner + Editor + Contributor
-      // can update task status.
       // ==========================================
 
       if (status !== undefined && status !== todo.status) {
         if (
+          isCollaborative &&
           userRole !== "owner" &&
           userRole !== "editor" &&
           userRole !== "contributor"
@@ -675,7 +712,7 @@ export const updateTask = async (req, res) => {
       }
 
       // ==========================================
-      // STEP 7: Check Whether Anything Changed
+      // STEP 9: Check Whether Anything Changed
       // ==========================================
 
       if (activities.length === 0) {
@@ -683,13 +720,17 @@ export const updateTask = async (req, res) => {
       }
 
       // ==========================================
-      // STEP 8: Save Updated Task
+      // STEP 10: Save Updated Task
       // ==========================================
 
       await todo.save({ session });
 
       // ==========================================
-      // STEP 9: Create Task Activities
+      // STEP 11: Create Activities
+      //
+      // IMPORTANT:
+      // Both personal and collaborative tasks
+      // create activities.
       // ==========================================
 
       createdActivities = await TaskActivity.insertMany(activities, {
@@ -697,61 +738,85 @@ export const updateTask = async (req, res) => {
       });
 
       // ==========================================
-      // STEP 10: Get Users Who Should Receive
-      // Notification
+      // STEP 12: Notifications
       //
-      // We notify all participants except the
-      // person who performed the update.
+      // IMPORTANT:
+      // Notifications are ONLY created for
+      // collaborative tasks.
       // ==========================================
 
-      const participantIds = todo.participants
-        .map((participant) => participant.user)
-        .filter(
-          (participantId) => participantId.toString() !== userId.toString()
-        );
+      if (isCollaborative) {
+        // ========================================
+        // Get All Participants Except Actor
+        // ========================================
 
-      // ==========================================
-      // Include owner if owner is not inside
-      // participants array.
-      // ==========================================
+        const participantIds = todo.participants
+          .map((participant) => participant.user)
+          .filter(
+            (participantId) => participantId.toString() !== userId.toString()
+          );
 
-      if (
-        todo.createdBy.toString() !== userId.toString() &&
-        !participantIds.some(
-          (participantId) =>
-            participantId.toString() === todo.createdBy.toString()
-        )
-      ) {
-        participantIds.push(todo.createdBy);
-      }
+        // ========================================
+        // Include Owner
+        //
+        // If owner is not inside participants,
+        // add the owner manually.
+        // ========================================
 
-      // ==========================================
-      // STEP 11: Create Notifications
-      // ==========================================
+        if (
+          todo.createdBy.toString() !== userId.toString() &&
+          !participantIds.some(
+            (participantId) =>
+              participantId.toString() === todo.createdBy.toString()
+          )
+        ) {
+          participantIds.push(todo.createdBy);
+        }
 
-      if (participantIds.length > 0) {
-        notifications = await Notification.insertMany(
-          participantIds.map((participantId) => ({
-            user: participantId,
-            sender: userId,
+        // ========================================
+        // Remove Duplicate Users
+        // ========================================
 
-            type: "TASK_UPDATED",
+        const uniqueParticipantIds = [
+          ...new Map(
+            participantIds.map((participantId) => [
+              participantId.toString(),
+              participantId,
+            ])
+          ).values(),
+        ];
 
-            title: "Task Updated",
+        // ========================================
+        // Create Notifications
+        // ========================================
 
-            message: `A task you are participating in was updated.`,
+        if (uniqueParticipantIds.length > 0) {
+          notifications = await Notification.insertMany(
+            uniqueParticipantIds.map((participantId) => ({
+              // Notification receiver
+              user: participantId,
 
-            todo: todo._id,
+              // User who performed update
+              sender: userId,
 
-            isRead: false,
-          })),
-          { session }
-        );
+              type: "TASK_UPDATED",
+
+              title: "Task Updated",
+
+              message: `A task you are participating in was updated.`,
+
+              todo: todo._id,
+
+              isRead: false,
+            })),
+            { session }
+          );
+        }
       }
     });
 
     // ==========================================
-    // STEP 12: No Changes Made
+    // STEP 13: No Changes Made
     // ==========================================
 
     if (createdActivities.length === 0) {
@@ -763,10 +828,9 @@ export const updateTask = async (req, res) => {
     }
 
     // ==========================================
-    // STEP 13: Emit Notifications
+    // STEP 14: Emit Notifications
     //
-    // IMPORTANT:
-    // Emit only after transaction commits.
+    // Only collaborative tasks have notifications.
     // ==========================================
 
     for (const notification of notifications) {
@@ -777,18 +841,19 @@ export const updateTask = async (req, res) => {
     }
 
     // ==========================================
-    // STEP 14: Emit Activities
+    // STEP 15: Emit Activities
     //
-    // All users connected to this task room
-    // can receive the activity.
+    // Only collaborative tasks have a task room.
     // ==========================================
 
-    for (const activity of createdActivities) {
-      io.to(`task:${todo._id.toString()}`).emit("task:activity", activity);
+    if (Array.isArray(todo.participants) && todo.participants.length > 0) {
+      for (const activity of createdActivities) {
+        io.to(`task:${todo._id.toString()}`).emit("task:activity", activity);
+      }
     }
 
     // ==========================================
-    // STEP 15: Success Response
+    // STEP 16: Success Response
     // ==========================================
 
     return res
@@ -798,17 +863,28 @@ export const updateTask = async (req, res) => {
     console.error("updateTask Error:", error);
 
     // ==========================================
-    // Handle Authorization / Not Found Errors
+    // STEP 17: Handle Not Found
     // ==========================================
 
-    if (
-      error.message === "Task not found" ||
-      error.message === "You are not a participant of this task"
-    ) {
+    if (error.message === "Task not found") {
       return res
         .status(404)
         .json(new ApiResponse(404, null, error.message, false));
     }
+
+    // ==========================================
+    // STEP 18: Handle Authorization
+    // ==========================================
+
+    if (error.message === "You are not a participant of this task") {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, error.message, false));
+    }
+
+    // ==========================================
+    // STEP 19: Handle Permission Errors
+    // ==========================================
 
     if (error.message.includes("permission")) {
       return res
@@ -817,7 +893,7 @@ export const updateTask = async (req, res) => {
     }
 
     // ==========================================
-    // Handle Other Errors
+    // STEP 20: Handle Other Errors
     // ==========================================
 
     return res
@@ -831,7 +907,10 @@ export const updateTask = async (req, res) => {
         )
       );
   } finally {
-    // Always close MongoDB session
+    // ==========================================
+    // Always Close MongoDB Session
+    // ==========================================
+
     await session.endSession();
   }
 };
@@ -841,7 +920,6 @@ export const updateTaskStatus = async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
-
     const userId = req.user.userId;
 
     // ==========================================
@@ -879,7 +957,7 @@ export const updateTaskStatus = async (req, res) => {
     }
 
     let todo;
-    let createdActivity = null;
+    let createdActivities = [];
     let notifications = [];
 
     // ==========================================
@@ -888,16 +966,12 @@ export const updateTaskStatus = async (req, res) => {
 
     await session.withTransaction(async () => {
       // ==========================================
-      // STEP 4: Find Group Todo
+      // STEP 4: Find Task
       // ==========================================
 
-      todo = await GroupTodo.findOne({
+      todo = await SingleTodo.findOne({
         _id: id,
-
-        // Task must not be deleted
         isDeleted: false,
-
-        // Task must not be archived
         isArchived: false,
       }).session(session);
 
@@ -906,30 +980,37 @@ export const updateTaskStatus = async (req, res) => {
       }
 
       // ==========================================
-      // STEP 5: Find Current User's Participant
+      // STEP 5: Check Whether Task Is
+      // Single or Collaborative
       // ==========================================
 
-      const participant = todo.participants.find(
-        (participant) => participant.user.toString() === userId.toString()
-      );
+      const isCollaborative =
+        Array.isArray(todo.participants) && todo.participants.length > 0;
 
       // ==========================================
-      // IMPORTANT:
-      //
-      // If creator is not inside participants,
-      // treat creator as owner.
+      // STEP 6: Authorization
       // ==========================================
 
       let userRole = null;
 
+      // Single task / Owner
       if (todo.createdBy.toString() === userId.toString()) {
         userRole = "owner";
-      } else if (participant) {
-        userRole = participant.role;
+      }
+
+      // Collaborative task
+      if (isCollaborative) {
+        const participant = todo.participants.find(
+          (participant) => participant.user.toString() === userId.toString()
+        );
+
+        if (participant) {
+          userRole = participant.role;
+        }
       }
 
       // ==========================================
-      // STEP 6: Check Authorization
+      // User is neither owner nor participant
       // ==========================================
 
       if (!userRole) {
@@ -945,7 +1026,7 @@ export const updateTaskStatus = async (req, res) => {
       }
 
       // ==========================================
-      // STEP 7: Check Whether Status Changed
+      // STEP 7: Check Status Change
       // ==========================================
 
       if (status === todo.status) {
@@ -963,100 +1044,114 @@ export const updateTaskStatus = async (req, res) => {
       await todo.save({ session });
 
       // ==========================================
-      // STEP 9: Create Task Activity
+      // STEP 9:
+      // Activity + Notification ONLY for
+      // Collaborative Tasks
       // ==========================================
 
-      const activity = {
-        todo: todo._id,
-        actor: userId,
-        targetUser: null,
+      if (isCollaborative) {
+        // ========================================
+        // Create Activity
+        // ========================================
 
-        type: "STATUS_UPDATED",
+        const activity = {
+          todo: todo._id,
+          actor: userId,
+          targetUser: null,
 
-        message: "Task status was updated.",
+          type: "STATUS_UPDATED",
 
-        metadata: {
-          oldValue: oldStatus,
-          newValue: status,
-        },
-      };
+          message: "Task status was updated.",
 
-      const activities = await TaskActivity.insertMany([activity], { session });
+          metadata: {
+            oldValue: oldStatus,
+            newValue: status,
+          },
+        };
 
-      createdActivity = activities[0];
+        createdActivities = await TaskActivity.insertMany([activity], {
+          session,
+        });
 
-      // ==========================================
-      // STEP 10: Get Notification Recipients
-      //
-      // Notify all participants except the actor.
-      // ==========================================
+        // ========================================
+        // Get Participants
+        // Except Current User
+        // ========================================
 
-      const participantIds = todo.participants
-        .map((participant) => participant.user)
-        .filter(
-          (participantId) => participantId.toString() !== userId.toString()
-        );
+        const participantIds = todo.participants
+          .map((participant) => participant.user)
+          .filter(
+            (participantId) => participantId.toString() !== userId.toString()
+          );
 
-      // ==========================================
-      // Include owner if owner is not already
-      // inside participants array.
-      // ==========================================
+        // ========================================
+        // Include Owner
+        // If Owner Is Not In Participants
+        // ========================================
 
-      if (
-        todo.createdBy.toString() !== userId.toString() &&
-        !participantIds.some(
-          (participantId) =>
-            participantId.toString() === todo.createdBy.toString()
-        )
-      ) {
-        participantIds.push(todo.createdBy);
-      }
+        if (
+          todo.createdBy.toString() !== userId.toString() &&
+          !participantIds.some(
+            (participantId) =>
+              participantId.toString() === todo.createdBy.toString()
+          )
+        ) {
+          participantIds.push(todo.createdBy);
+        }
 
-      // ==========================================
-      // STEP 11: Create Notifications
-      // ==========================================
+        // ========================================
+        // Create Notifications
+        // ========================================
 
-      if (participantIds.length > 0) {
-        notifications = await Notification.insertMany(
-          participantIds.map((participantId) => ({
-            // Notification receiver
-            user: participantId,
+        if (participantIds.length > 0) {
+          notifications = await Notification.insertMany(
+            participantIds.map((participantId) => ({
+              // Receiver
+              user: participantId,
 
-            // Person who changed the status
-            sender: userId,
+              // Person who changed status
+              sender: userId,
 
-            type: "TASK_UPDATED",
+              type: "TASK_UPDATED",
 
-            title: "Task Status Updated",
+              title: "Task Status Updated",
 
-            message: `Task "${todo.title}" status was changed from ${oldStatus} to ${status}.`,
+              message: `Task "${todo.title}" status was changed from ${oldStatus} to ${status}.`,
 
-            todo: todo._id,
+              todo: todo._id,
 
-            isRead: false,
-          })),
-          { session }
-        );
+              isRead: false,
+            })),
+            { session }
+          );
+        }
       }
     });
 
     // ==========================================
-    // STEP 12: No Status Change
+    // STEP 10: No Status Change
     // ==========================================
 
-    if (!createdActivity) {
-      return res
-        .status(200)
-        .json(
-          new ApiResponse(200, todo, "Task status is already up to date.", true)
-        );
+    if (todo.status === status) {
+      // If it was already the same status and
+      // no activity was created
+      if (createdActivities.length === 0) {
+        return res
+          .status(200)
+          .json(
+            new ApiResponse(
+              200,
+              todo,
+              "Task status is already up to date.",
+              true
+            )
+          );
+      }
     }
 
     // ==========================================
-    // STEP 13: Emit Notifications
-    //
-    // IMPORTANT:
-    // Emit only AFTER transaction commits.
+    // STEP 11: Emit Notifications
+    // ONLY Collaborative Task
     // ==========================================
 
     for (const notification of notifications) {
@@ -1067,15 +1162,16 @@ export const updateTaskStatus = async (req, res) => {
     }
 
     // ==========================================
-    // STEP 14: Emit Task Activity
-    //
-    // Everyone inside the task room receives it.
+    // STEP 12: Emit Activity
+    // ONLY Collaborative Task
     // ==========================================
 
-    io.to(`task:${todo._id.toString()}`).emit("task:activity", createdActivity);
+    for (const activity of createdActivities) {
+      io.to(`task:${todo._id.toString()}`).emit("task:activity", activity);
+    }
 
     // ==========================================
-    // STEP 15: Success Response
+    // STEP 13: Success Response
     // ==========================================
 
     return res
@@ -1087,7 +1183,7 @@ export const updateTaskStatus = async (req, res) => {
     console.error("updateTaskStatus Error:", error);
 
     // ==========================================
-    // Handle Not Found / Authorization Errors
+    // Handle Not Found / Authorization
     // ==========================================
 
     if (
@@ -1125,53 +1221,337 @@ export const updateTaskStatus = async (req, res) => {
       );
   } finally {
     // ==========================================
-    // Always close MongoDB session
+    // Always End Session
     // ==========================================
 
     await session.endSession();
   }
 };
 export const deleteTask = async (req, res) => {
+  const session = await mongoose.startSession();
+
   try {
     const { id } = req.params;
+    const userId = req.user.userId;
 
-    // STEP 1: Validate ObjectId
+    // ==========================================
+    // STEP 1: Validate MongoDB Task ID
+    // ==========================================
+
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res
         .status(400)
         .json(new ApiResponse(400, null, "Invalid task ID", false));
     }
 
-    // STEP 2: Find and delete the task
-    const deletedTask = await SingleTodo.findOne({
-      _id: id,
-      createdBy: req.user.userId,
+    let deletedTask;
+    let createdActivity = null;
+    let notifications = [];
+
+    // ==========================================
+    // STEP 2: Start Transaction
+    // ==========================================
+
+    await session.withTransaction(async () => {
+      // ==========================================
+      // STEP 3: Find Task
+      // ==========================================
+
+      const todo = await SingleTodo.findOne({
+        _id: id,
+        isArchived: false,
+        isDeleted: false,
+      }).session(session);
+
+      if (!todo) {
+        throw new Error("Task not found");
+      }
+
+      // ==========================================
+      // STEP 4: Determine Task Type
+      // ==========================================
+
+      const isCollaborative =
+        Array.isArray(todo.participants) && todo.participants.length > 0;
+
+      // ==========================================
+      // STEP 5: Find Participant
+      // ==========================================
+
+      const participant = isCollaborative
+        ? todo.participants.find(
+            (participant) => participant.user.toString() === userId.toString()
+          )
+        : null;
+
+      // ==========================================
+      // STEP 6: Determine User Role
+      // ==========================================
+
+      let userRole = null;
+
+      // Owner
+      if (todo.createdBy.toString() === userId.toString()) {
+        userRole = "owner";
+      }
+
+      // Collaborative participant
+      else if (participant) {
+        userRole = participant.role;
+      }
+
+      // ==========================================
+      // STEP 7: Authorization
+      // ==========================================
+
+      if (!userRole) {
+        throw new Error("You are not a participant of this task");
+      }
+
+      // ==========================================
+      // PERSONAL TASK
+      //
+      // Only owner can delete.
+      // ==========================================
+
+      if (!isCollaborative && userRole !== "owner") {
+        throw new Error("You do not have permission to delete this task");
+      }
+
+      // ==========================================
+      // COLLABORATIVE TASK
+      //
+      // Only owner can delete the task.
+      //
+      // If you want editor to delete too,
+      // change this condition.
+      // ==========================================
+
+      if (isCollaborative && userRole !== "owner") {
+        throw new Error("Only the task owner can delete this task");
+      }
+
+      // ==========================================
+      // STEP 8: Create Delete Activity
+      //
+      // Activity is created for BOTH:
+      // Personal + Collaborative tasks.
+      // ==========================================
+
+      const activity = {
+        todo: todo._id,
+        actor: userId,
+        targetUser: null,
+
+        type: "TASK_DELETED",
+
+        message: "Task was deleted.",
+
+        metadata: {
+          oldStatus: todo.status,
+          taskTitle: todo.title,
+        },
+      };
+
+      const activities = await TaskActivity.insertMany([activity], { session });
+
+      createdActivity = activities[0];
+
+      // ==========================================
+      // STEP 9: Soft Delete Task
+      // ==========================================
+
+      todo.isDeleted = true;
+      todo.deletedAt = new Date();
+
+      await todo.save({ session });
+
+      deletedTask = todo;
+
+      // ==========================================
+      // STEP 10: Notifications
+      //
+      // ONLY collaborative tasks.
+      // Personal tasks have nobody to notify.
+      // ==========================================
+
+      if (isCollaborative) {
+        // ========================================
+        // Get all participants except actor
+        // ========================================
+
+        const participantIds = todo.participants
+          .map((participant) => participant.user)
+          .filter(
+            (participantId) => participantId.toString() !== userId.toString()
+          );
+
+        // ========================================
+        // Include owner if owner is not already
+        // inside participants.
+        // ========================================
+
+        if (
+          todo.createdBy.toString() !== userId.toString() &&
+          !participantIds.some(
+            (participantId) =>
+              participantId.toString() === todo.createdBy.toString()
+          )
+        ) {
+          participantIds.push(todo.createdBy);
+        }
+
+        // ========================================
+        // Remove duplicate users
+        // ========================================
+
+        const uniqueParticipantIds = [
+          ...new Map(
+            participantIds.map((participantId) => [
+              participantId.toString(),
+              participantId,
+            ])
+          ).values(),
+        ];
+
+        // ========================================
+        // Create Notifications
+        // ========================================
+
+        if (uniqueParticipantIds.length > 0) {
+          notifications = await Notification.insertMany(
+            uniqueParticipantIds.map((participantId) => ({
+              // Notification receiver
+              user: participantId,
+
+              // User who deleted the task
+              sender: userId,
+
+              type: "TASK_DELETED",
+
+              title: "Task Deleted",
+
+              message: `The task "${todo.title}" was deleted.`,
+
+              todo: todo._id,
+
+              isRead: false,
+            })),
+            { session }
+          );
+        }
+      }
     });
 
-    // STEP 3: Task not found
-    if (!deletedTask) {
-      return res
-        .status(404)
-        .json(new ApiResponse(404, null, "Task not found", false));
+    // ==========================================
+    // STEP 11: Emit Notifications
+    //
+    // Only collaborative tasks have notifications.
+    // ==========================================
+
+    for (const notification of notifications) {
+      io.to(`user:${notification.user.toString()}`).emit(
+        "notification",
+        notification
+      );
     }
 
-    deletedTask.isDeleted = true;
-    deletedTask.deletedAt = new Date();
-    await deletedTask.save();
+    // ==========================================
+    // STEP 12: Emit Activity
+    //
+    // Only collaborative tasks have a task room.
+    // ==========================================
 
-    // STEP 4: Success response
+    if (
+      Array.isArray(deletedTask.participants) &&
+      deletedTask.participants.length > 0
+    ) {
+      io.to(`task:${deletedTask._id.toString()}`).emit(
+        "task:activity",
+        createdActivity
+      );
+
+      // ========================================
+      // Optional: Tell task room that task
+      // has been deleted.
+      // ========================================
+
+      io.to(`task:${deletedTask._id.toString()}`).emit("task:deleted", {
+        todoId: deletedTask._id,
+        deletedBy: userId,
+      });
+    }
+
+    // ==========================================
+    // STEP 13: Success Response
+    // ==========================================
+
     return res
       .status(200)
       .json(
         new ApiResponse(200, deletedTask, "Task deleted successfully", true)
       );
   } catch (error) {
+    console.error("deleteTask Error:", error);
+
+    // ==========================================
+    // STEP 14: Handle Not Found
+    // ==========================================
+
+    if (error.message === "Task not found") {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, error.message, false));
+    }
+
+    // ==========================================
+    // STEP 15: Handle Authorization
+    // ==========================================
+
+    if (error.message === "You are not a participant of this task") {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, error.message, false));
+    }
+
+    // ==========================================
+    // STEP 16: Handle Permission
+    // ==========================================
+
+    if (error.message.includes("permission")) {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, error.message, false));
+    }
+
+    if (error.message.includes("Only the task owner")) {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, error.message, false));
+    }
+
+    // ==========================================
+    // STEP 17: Handle Other Errors
+    // ==========================================
+
     return res
       .status(500)
-      .json(new ApiResponse(500, null, error.message, false));
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          error.message || "Failed to delete task",
+          false
+        )
+      );
+  } finally {
+    // ==========================================
+    // Always Close Session
+    // ==========================================
+
+    await session.endSession();
   }
 };
-
 export const getTask = async (req, res) => {
   try {
     const { id } = req.params;
