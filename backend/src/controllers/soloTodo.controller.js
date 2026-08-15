@@ -835,11 +835,36 @@ export const updateTask = async (req, res) => {
     await session.endSession();
   }
 };
-
 export const updateTaskStatus = async (req, res) => {
+  const session = await mongoose.startSession();
+
   try {
     const { id } = req.params;
     const { status } = req.body;
+
+    const userId = req.user.userId;
+
+    // ==========================================
+    // STEP 1: Validate MongoDB Task ID
+    // ==========================================
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task ID", false));
+    }
+
+    // ==========================================
+    // STEP 2: Validate Status
+    // ==========================================
+
+    const allowedStatuses = [
+      "START",
+      "PENDING",
+      "ON_GOING",
+      "COMPLETED",
+      "IN_COMPLETE",
+    ];
 
     if (!status) {
       return res
@@ -847,38 +872,265 @@ export const updateTaskStatus = async (req, res) => {
         .json(new ApiResponse(400, null, "Status is required", false));
     }
 
-    const todo = await SingleTodo.findOneAndUpdate(
-      {
-        _id: id,
-        createdBy: req.user.userId,
-        isDeleted: false,
-        isArchived: false,
-      },
-      {
-        status,
-      },
-      {
-        new: true,
-        runValidators: true,
-      }
-    );
-
-    if (!todo) {
+    if (!allowedStatuses.includes(status)) {
       return res
-        .status(404)
-        .json(new ApiResponse(404, null, "Task not found", false));
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid status", false));
     }
+
+    let todo;
+    let createdActivity = null;
+    let notifications = [];
+
+    // ==========================================
+    // STEP 3: Start MongoDB Transaction
+    // ==========================================
+
+    await session.withTransaction(async () => {
+      // ==========================================
+      // STEP 4: Find Group Todo
+      // ==========================================
+
+      todo = await GroupTodo.findOne({
+        _id: id,
+
+        // Task must not be deleted
+        isDeleted: false,
+
+        // Task must not be archived
+        isArchived: false,
+      }).session(session);
+
+      if (!todo) {
+        throw new Error("Task not found");
+      }
+
+      // ==========================================
+      // STEP 5: Find Current User's Participant
+      // ==========================================
+
+      const participant = todo.participants.find(
+        (participant) => participant.user.toString() === userId.toString()
+      );
+
+      // ==========================================
+      // IMPORTANT:
+      //
+      // If creator is not inside participants,
+      // treat creator as owner.
+      // ==========================================
+
+      let userRole = null;
+
+      if (todo.createdBy.toString() === userId.toString()) {
+        userRole = "owner";
+      } else if (participant) {
+        userRole = participant.role;
+      }
+
+      // ==========================================
+      // STEP 6: Check Authorization
+      // ==========================================
+
+      if (!userRole) {
+        throw new Error("You are not a participant of this task");
+      }
+
+      // ==========================================
+      // Viewer cannot update status
+      // ==========================================
+
+      if (userRole === "viewer") {
+        throw new Error("You do not have permission to update task status");
+      }
+
+      // ==========================================
+      // STEP 7: Check Whether Status Changed
+      // ==========================================
+
+      if (status === todo.status) {
+        return;
+      }
+
+      const oldStatus = todo.status;
+
+      // ==========================================
+      // STEP 8: Update Status
+      // ==========================================
+
+      todo.status = status;
+
+      await todo.save({ session });
+
+      // ==========================================
+      // STEP 9: Create Task Activity
+      // ==========================================
+
+      const activity = {
+        todo: todo._id,
+        actor: userId,
+        targetUser: null,
+
+        type: "STATUS_UPDATED",
+
+        message: "Task status was updated.",
+
+        metadata: {
+          oldValue: oldStatus,
+          newValue: status,
+        },
+      };
+
+      const activities = await TaskActivity.insertMany([activity], { session });
+
+      createdActivity = activities[0];
+
+      // ==========================================
+      // STEP 10: Get Notification Recipients
+      //
+      // Notify all participants except the actor.
+      // ==========================================
+
+      const participantIds = todo.participants
+        .map((participant) => participant.user)
+        .filter(
+          (participantId) => participantId.toString() !== userId.toString()
+        );
+
+      // ==========================================
+      // Include owner if owner is not already
+      // inside participants array.
+      // ==========================================
+
+      if (
+        todo.createdBy.toString() !== userId.toString() &&
+        !participantIds.some(
+          (participantId) =>
+            participantId.toString() === todo.createdBy.toString()
+        )
+      ) {
+        participantIds.push(todo.createdBy);
+      }
+
+      // ==========================================
+      // STEP 11: Create Notifications
+      // ==========================================
+
+      if (participantIds.length > 0) {
+        notifications = await Notification.insertMany(
+          participantIds.map((participantId) => ({
+            // Notification receiver
+            user: participantId,
+
+            // Person who changed the status
+            sender: userId,
+
+            type: "TASK_UPDATED",
+
+            title: "Task Status Updated",
+
+            message: `Task "${todo.title}" status was changed from ${oldStatus} to ${status}.`,
+
+            todo: todo._id,
+
+            isRead: false,
+          })),
+          { session }
+        );
+      }
+    });
+
+    // ==========================================
+    // STEP 12: No Status Change
+    // ==========================================
+
+    if (!createdActivity) {
+      return res
+        .status(200)
+        .json(
+          new ApiResponse(200, todo, "Task status is already up to date.", true)
+        );
+    }
+
+    // ==========================================
+    // STEP 13: Emit Notifications
+    //
+    // IMPORTANT:
+    // Emit only AFTER transaction commits.
+    // ==========================================
+
+    for (const notification of notifications) {
+      io.to(`user:${notification.user.toString()}`).emit(
+        "notification",
+        notification
+      );
+    }
+
+    // ==========================================
+    // STEP 14: Emit Task Activity
+    //
+    // Everyone inside the task room receives it.
+    // ==========================================
+
+    io.to(`task:${todo._id.toString()}`).emit("task:activity", createdActivity);
+
+    // ==========================================
+    // STEP 15: Success Response
+    // ==========================================
 
     return res
       .status(200)
-      .json(new ApiResponse(200, todo, "Status updated successfully", true));
+      .json(
+        new ApiResponse(200, todo, "Task status updated successfully.", true)
+      );
   } catch (error) {
+    console.error("updateTaskStatus Error:", error);
+
+    // ==========================================
+    // Handle Not Found / Authorization Errors
+    // ==========================================
+
+    if (
+      error.message === "Task not found" ||
+      error.message === "You are not a participant of this task"
+    ) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, error.message, false));
+    }
+
+    // ==========================================
+    // Handle Permission Errors
+    // ==========================================
+
+    if (error.message.includes("permission")) {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, error.message, false));
+    }
+
+    // ==========================================
+    // Handle Other Errors
+    // ==========================================
+
     return res
       .status(500)
-      .json(new ApiResponse(500, null, error.message, false));
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          error.message || "Failed to update task status",
+          false
+        )
+      );
+  } finally {
+    // ==========================================
+    // Always close MongoDB session
+    // ==========================================
+
+    await session.endSession();
   }
 };
-
 export const deleteTask = async (req, res) => {
   try {
     const { id } = req.params;
