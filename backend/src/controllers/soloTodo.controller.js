@@ -1588,7 +1588,6 @@ export const getTask = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-
 export const getAllTasks = async (req, res) => {
   try {
     // STEP 1: Get all tasks of logged-in user
@@ -1608,88 +1607,706 @@ export const getAllTasks = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-
 export const restoreArchiveTask = async (req, res) => {
+  const session = await mongoose.startSession();
+
   try {
     const { id } = req.params;
+    const userId = req.user.userId;
 
-    // STEP 1: Validate ObjectId
+    // ==========================================
+    // STEP 1: Validate MongoDB Task ID
+    // ==========================================
+
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res
         .status(400)
         .json(new ApiResponse(400, null, "Invalid task ID", false));
     }
 
-    //STEP:2 FIND TASK BY ID
-    const task = await SingleTodo.findOne({
-      _id: id,
-      createdBy: req.user.userId,
-      isArchived: true,
-      isDeleted: false,
+    let restoredTask;
+    let createdActivity = null;
+    let notifications = [];
+
+    // ==========================================
+    // STEP 2: Start Transaction
+    //
+    // Task restoration, activity creation and
+    // notifications must succeed together.
+    // ==========================================
+
+    await session.withTransaction(async () => {
+      // ==========================================
+      // STEP 3: Find Archived Task
+      //
+      // Do NOT filter by createdBy here because
+      // collaborative editors may also restore
+      // the task.
+      // ==========================================
+
+      const todo = await SingleTodo.findOne({
+        _id: id,
+        isArchived: true,
+        isDeleted: false,
+      }).session(session);
+
+      if (!todo) {
+        throw new Error("Task not found");
+      }
+
+      // ==========================================
+      // STEP 4: Determine Task Type
+      //
+      // A task is considered collaborative when
+      // it contains participants.
+      // ==========================================
+
+      const isCollaborative =
+        Array.isArray(todo.participants) && todo.participants.length > 0;
+
+      // ==========================================
+      // STEP 5: Find Current User as Participant
+      //
+      // This is only required for collaborative
+      // tasks.
+      // ==========================================
+
+      const participant = isCollaborative
+        ? todo.participants.find(
+            (participant) => participant.user.toString() === userId.toString()
+          )
+        : null;
+
+      // ==========================================
+      // STEP 6: Determine User Role
+      // ==========================================
+
+      let userRole = null;
+
+      // ------------------------------------------
+      // Task Owner
+      // ------------------------------------------
+
+      if (todo.createdBy.toString() === userId.toString()) {
+        userRole = "owner";
+      }
+
+      // ------------------------------------------
+      // Collaborative Participant
+      // ------------------------------------------
+      else if (participant) {
+        userRole = participant.role;
+      }
+
+      // ==========================================
+      // STEP 7: Authorization
+      // ==========================================
+
+      if (!userRole) {
+        throw new Error("You are not a participant of this task");
+      }
+
+      // ==========================================
+      // PERSONAL TASK
+      //
+      // Only the owner can restore a personal task.
+      // ==========================================
+
+      if (!isCollaborative && userRole !== "owner") {
+        throw new Error("You do not have permission to restore this task");
+      }
+
+      // ==========================================
+      // COLLABORATIVE TASK
+      //
+      // Owner and editor can restore the task.
+      // Viewer/member cannot restore it.
+      // ==========================================
+
+      if (isCollaborative && userRole !== "owner" && userRole !== "editor") {
+        throw new Error("You do not have permission to restore this task");
+      }
+
+      // ==========================================
+      // STEP 8: Create Task Activity
+      //
+      // Activity is created for both personal
+      // and collaborative tasks.
+      // ==========================================
+
+      const activity = {
+        todo: todo._id,
+        actor: userId,
+
+        // No specific target for a restore activity.
+        targetUser: null,
+
+        type: "TASK_RESTORED",
+
+        message: `Task "${todo.title}" was restored.`,
+
+        metadata: {
+          oldValue: true,
+          newValue: false,
+          taskTitle: todo.title,
+        },
+      };
+
+      const activities = await TaskActivity.insertMany([activity], { session });
+
+      createdActivity = activities[0];
+
+      // ==========================================
+      // STEP 9: Restore Task
+      //
+      // Convert archived task back to active state.
+      // ==========================================
+
+      todo.isArchived = false;
+
+      await todo.save({ session });
+
+      restoredTask = todo;
+
+      // ==========================================
+      // STEP 10: Create Notifications
+      //
+      // Personal tasks have nobody else to notify.
+      //
+      // Collaborative tasks notify every participant
+      // except the user who performed the restore.
+      // ==========================================
+
+      if (isCollaborative) {
+        // ----------------------------------------
+        // Get all participants except actor
+        // ----------------------------------------
+
+        const participantIds = todo.participants
+          .map((participant) => participant.user)
+          .filter(
+            (participantId) => participantId.toString() !== userId.toString()
+          );
+
+        // ----------------------------------------
+        // Include owner if owner is not already
+        // present inside participants.
+        // ----------------------------------------
+
+        if (
+          todo.createdBy.toString() !== userId.toString() &&
+          !participantIds.some(
+            (participantId) =>
+              participantId.toString() === todo.createdBy.toString()
+          )
+        ) {
+          participantIds.push(todo.createdBy);
+        }
+
+        // ----------------------------------------
+        // Remove duplicate users
+        // ----------------------------------------
+
+        const uniqueParticipantIds = [
+          ...new Map(
+            participantIds.map((participantId) => [
+              participantId.toString(),
+              participantId,
+            ])
+          ).values(),
+        ];
+
+        // ----------------------------------------
+        // Create Notifications
+        // ----------------------------------------
+
+        if (uniqueParticipantIds.length > 0) {
+          notifications = await Notification.insertMany(
+            uniqueParticipantIds.map((participantId) => ({
+              // Notification receiver
+              user: participantId,
+
+              // User who restored the task
+              sender: userId,
+
+              type: "TASK_RESTORED",
+
+              title: "Task Restored",
+
+              message: `The task "${todo.title}" was restored.`,
+
+              todo: todo._id,
+
+              isRead: false,
+            })),
+            { session }
+          );
+        }
+      }
     });
 
-    //STEP:3 CHECK THE TASK IS FOUND OR NOT
-    if (!task) {
-      return res
-        .status(404)
-        .json(new ApiResponse(404, null, "Task not found", false));
+    // ==========================================
+    // STEP 11: Emit Notifications
+    //
+    // Socket events are emitted AFTER the
+    // transaction successfully commits.
+    //
+    // This prevents users from receiving a
+    // notification for a transaction that failed.
+    // ==========================================
+
+    for (const notification of notifications) {
+      io.to(`user:${notification.user.toString()}`).emit(
+        "notification",
+        notification
+      );
     }
 
-    //STEP:5 RESTORE THAT TASK
-    task.isArchived = false;
-    await task.save();
+    // ==========================================
+    // STEP 12: Emit Task Activity
+    //
+    // Only collaborative tasks have a task room.
+    // ==========================================
 
-    //STEP:6 RETURN SUCCESS MESSAGE TO THE USER
+    if (
+      Array.isArray(restoredTask.participants) &&
+      restoredTask.participants.length > 0
+    ) {
+      // ----------------------------------------
+      // Notify task room about new activity
+      // ----------------------------------------
+
+      io.to(`task:${restoredTask._id.toString()}`).emit(
+        "task:activity",
+        createdActivity
+      );
+
+      // ----------------------------------------
+      // Notify task room that task was restored
+      // ----------------------------------------
+
+      io.to(`task:${restoredTask._id.toString()}`).emit("task:restored", {
+        todoId: restoredTask._id,
+        restoredBy: userId,
+      });
+    }
+
+    // ==========================================
+    // STEP 13: Return Success Response
+    // ==========================================
+
     return res
       .status(200)
-      .json(new ApiResponse(200, task, "Task restored successfully", true));
+      .json(
+        new ApiResponse(200, restoredTask, "Task restored successfully", true)
+      );
   } catch (error) {
+    console.error("restoreArchiveTask Error:", error);
+
+    // ==========================================
+    // STEP 14: Handle Task Not Found
+    // ==========================================
+
+    if (error.message === "Task not found") {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, error.message, false));
+    }
+
+    // ==========================================
+    // STEP 15: Handle Participant Authorization
+    // ==========================================
+
+    if (error.message === "You are not a participant of this task") {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, error.message, false));
+    }
+
+    // ==========================================
+    // STEP 16: Handle Permission Errors
+    // ==========================================
+
+    if (error.message.includes("permission")) {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, error.message, false));
+    }
+
+    // ==========================================
+    // STEP 17: Handle Unexpected Errors
+    // ==========================================
+
     return res
       .status(500)
-      .json(new ApiResponse(500, null, error.message, false));
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          error.message || "Failed to restore task",
+          false
+        )
+      );
+  } finally {
+    // ==========================================
+    // STEP 18: Always Close MongoDB Session
+    // ==========================================
+
+    await session.endSession();
   }
 };
-
 export const restoreDeletedTask = async (req, res) => {
+  const session = await mongoose.startSession();
+
   try {
     const { id } = req.params;
+    const userId = req.user.userId;
 
-    // STEP 1: Validate ObjectId
+    // ==========================================
+    // STEP 1: Validate MongoDB Task ID
+    // ==========================================
+
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res
         .status(400)
         .json(new ApiResponse(400, null, "Invalid task ID", false));
     }
 
-    //STEP:2 FIND TASK BY ID
-    const task = await SingleTodo.findOne({
-      _id: id,
-      createdBy: req.user.userId,
-      isDeleted: true,
+    let restoredTask;
+    let createdActivity = null;
+    let notifications = [];
+
+    // ==========================================
+    // STEP 2: Start MongoDB Transaction
+    //
+    // Task restoration, activity creation and
+    // notifications should succeed together.
+    // ==========================================
+
+    await session.withTransaction(async () => {
+      // ==========================================
+      // STEP 3: Find Deleted Task
+      //
+      // Do not filter by createdBy here because
+      // collaborative participants may also have
+      // permission to restore the task.
+      // ==========================================
+
+      const todo = await SingleTodo.findOne({
+        _id: id,
+        isDeleted: true,
+      }).session(session);
+
+      // ==========================================
+      // STEP 4: Check Task Exists
+      // ==========================================
+
+      if (!todo) {
+        throw new Error("Task not found");
+      }
+
+      // ==========================================
+      // STEP 5: Determine Task Type
+      //
+      // A task is collaborative when it contains
+      // one or more participants.
+      // ==========================================
+
+      const isCollaborative =
+        Array.isArray(todo.participants) && todo.participants.length > 0;
+
+      // ==========================================
+      // STEP 6: Find Current User as Participant
+      //
+      // This is required only for collaborative
+      // tasks.
+      // ==========================================
+
+      const participant = isCollaborative
+        ? todo.participants.find(
+            (participant) => participant.user.toString() === userId.toString()
+          )
+        : null;
+
+      // ==========================================
+      // STEP 7: Determine User Role
+      // ==========================================
+
+      let userRole = null;
+
+      // ------------------------------------------
+      // Task Owner
+      // ------------------------------------------
+
+      if (todo.createdBy.toString() === userId.toString()) {
+        userRole = "owner";
+      }
+
+      // ------------------------------------------
+      // Collaborative Participant
+      // ------------------------------------------
+      else if (participant) {
+        userRole = participant.role;
+      }
+
+      // ==========================================
+      // STEP 8: Authorization
+      // ==========================================
+
+      if (!userRole) {
+        throw new Error("You are not a participant of this task");
+      }
+
+      // ==========================================
+      // PERSONAL TASK
+      //
+      // Only the owner can restore a personal task.
+      // ==========================================
+
+      if (!isCollaborative && userRole !== "owner") {
+        throw new Error("You do not have permission to restore this task");
+      }
+
+      // ==========================================
+      // COLLABORATIVE TASK
+      //
+      // Owner and editor can restore the task.
+      // Viewer/member cannot restore it.
+      // ==========================================
+
+      if (isCollaborative && userRole !== "owner" && userRole !== "editor") {
+        throw new Error("You do not have permission to restore this task");
+      }
+
+      // ==========================================
+      // STEP 9: Create Task Activity
+      //
+      // Activity is created for both personal and
+      // collaborative tasks.
+      // ==========================================
+
+      const activity = {
+        todo: todo._id,
+        actor: userId,
+
+        // No specific target user for restore activity.
+        targetUser: null,
+
+        type: "TASK_RESTORED",
+
+        message: `Task "${todo.title}" was restored.`,
+
+        metadata: {
+          oldValue: true,
+          newValue: false,
+          taskTitle: todo.title,
+        },
+      };
+
+      const activities = await TaskActivity.insertMany([activity], { session });
+
+      createdActivity = activities[0];
+
+      // ==========================================
+      // STEP 10: Restore Deleted Task
+      //
+      // Reset soft-delete fields so the task becomes
+      // active again.
+      // ==========================================
+
+      todo.isDeleted = false;
+      todo.deletedAt = null;
+
+      await todo.save({ session });
+
+      restoredTask = todo;
+
+      // ==========================================
+      // STEP 11: Create Notifications
+      //
+      // Personal tasks do not have other users to
+      // notify.
+      //
+      // Collaborative tasks notify all participants
+      // except the user who restored the task.
+      // ==========================================
+
+      if (isCollaborative) {
+        // ----------------------------------------
+        // Get all participants except the actor
+        // ----------------------------------------
+
+        const participantIds = todo.participants
+          .map((participant) => participant.user)
+          .filter(
+            (participantId) => participantId.toString() !== userId.toString()
+          );
+
+        // ----------------------------------------
+        // Include owner if owner is not already
+        // present inside participants.
+        // ----------------------------------------
+
+        if (
+          todo.createdBy.toString() !== userId.toString() &&
+          !participantIds.some(
+            (participantId) =>
+              participantId.toString() === todo.createdBy.toString()
+          )
+        ) {
+          participantIds.push(todo.createdBy);
+        }
+
+        // ----------------------------------------
+        // Remove duplicate users
+        // ----------------------------------------
+
+        const uniqueParticipantIds = [
+          ...new Map(
+            participantIds.map((participantId) => [
+              participantId.toString(),
+              participantId,
+            ])
+          ).values(),
+        ];
+
+        // ----------------------------------------
+        // Create Notifications
+        // ----------------------------------------
+
+        if (uniqueParticipantIds.length > 0) {
+          notifications = await Notification.insertMany(
+            uniqueParticipantIds.map((participantId) => ({
+              // Notification receiver
+              user: participantId,
+
+              // User who restored the task
+              sender: userId,
+
+              type: "TASK_RESTORED",
+
+              title: "Task Restored",
+
+              message: `The task "${todo.title}" was restored.`,
+
+              todo: todo._id,
+
+              isRead: false,
+            })),
+            { session }
+          );
+        }
+      }
     });
 
-    //STEP:3 CHECK THE TASK IS FOUND OR NOT
-    if (!task) {
-      return res
-        .status(404)
-        .json(new ApiResponse(404, null, "Task not found", false));
+    // ==========================================
+    // STEP 12: Emit Notifications
+    //
+    // Socket events are emitted only after the
+    // transaction successfully commits.
+    // ==========================================
+
+    for (const notification of notifications) {
+      io.to(`user:${notification.user.toString()}`).emit(
+        "notification",
+        notification
+      );
     }
 
-    task.isDeleted = false;
-    task.deletedAt = null;
-    await task.save();
+    // ==========================================
+    // STEP 13: Emit Task Activity
+    //
+    // Collaborative tasks have a dedicated
+    // Socket.io task room.
+    // ==========================================
 
-    //STEP:6 RETURN SUCCESS MESSAGE TO THE USER
+    if (
+      Array.isArray(restoredTask.participants) &&
+      restoredTask.participants.length > 0
+    ) {
+      // ----------------------------------------
+      // Notify task room about the activity
+      // ----------------------------------------
+
+      io.to(`task:${restoredTask._id.toString()}`).emit(
+        "task:activity",
+        createdActivity
+      );
+
+      // ----------------------------------------
+      // Notify task room that task was restored
+      // ----------------------------------------
+
+      io.to(`task:${restoredTask._id.toString()}`).emit("task:restored", {
+        todoId: restoredTask._id,
+        restoredBy: userId,
+      });
+    }
+
+    // ==========================================
+    // STEP 14: Return Success Response
+    // ==========================================
+
     return res
       .status(200)
-      .json(new ApiResponse(200, task, "Deleted Task Restore ", true));
+      .json(
+        new ApiResponse(200, restoredTask, "Task restored successfully", true)
+      );
   } catch (error) {
+    console.error("restoreDeletedTask Error:", error);
+
+    // ==========================================
+    // STEP 15: Handle Task Not Found
+    // ==========================================
+
+    if (error.message === "Task not found") {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, error.message, false));
+    }
+
+    // ==========================================
+    // STEP 16: Handle Participant Authorization
+    // ==========================================
+
+    if (error.message === "You are not a participant of this task") {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, error.message, false));
+    }
+
+    // ==========================================
+    // STEP 17: Handle Permission Errors
+    // ==========================================
+
+    if (error.message.includes("permission")) {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, error.message, false));
+    }
+
+    // ==========================================
+    // STEP 18: Handle Unexpected Errors
+    // ==========================================
+
     return res
       .status(500)
-      .json(new ApiResponse(500, null, error.message, false));
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          error.message || "Failed to restore task",
+          false
+        )
+      );
+  } finally {
+    // ==========================================
+    // STEP 19: Always Close MongoDB Session
+    // ==========================================
+
+    await session.endSession();
   }
 };
-
 export const archiveTask = async (req, res) => {
   try {
     const { id } = req.params;
