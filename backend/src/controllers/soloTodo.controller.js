@@ -5,6 +5,8 @@ import mongoose from "mongoose";
 import { User } from "../models/user.model.js";
 import { Notification } from "../models/notification.model.js";
 import { TaskActivity } from "../models/taskactivity.model.js";
+import { Invite } from "../models/invite.model.js";
+import { io } from "../../server.js";
 
 // controllers/todo.controller.js
 
@@ -2308,8 +2310,11 @@ export const restoreDeletedTask = async (req, res) => {
   }
 };
 export const archiveTask = async (req, res) => {
+  const session = await mongoose.startSession();
+
   try {
     const { id } = req.params;
+    const userId = req.user.userId;
 
     // STEP 1: Validate ObjectId
     if (!mongoose.Types.ObjectId.isValid(id)) {
@@ -2318,32 +2323,505 @@ export const archiveTask = async (req, res) => {
         .json(new ApiResponse(400, null, "Invalid task ID", false));
     }
 
-    //STEP:2 FIND TASK BY ID
-    const task = await SingleTodo.findOne({
-      _id: id,
-      createdBy: req.user.userId,
-      isArchived: false,
-      isDeleted: false,
+    let task;
+
+    await session.withTransaction(async () => {
+      // STEP 2: Find task
+      // Do NOT filter by createdBy here because
+      // collaborative participants may also archive the task.
+      task = await SingleTodo.findOne({
+        _id: id,
+        isArchived: false,
+        isDeleted: false,
+      }).session(session);
+
+      // STEP 3: Check task exists
+      if (!task) {
+        const error = new Error("Task not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // STEP 4: Determine whether this is a collaborative task
+      const isCollaborative = task.participants?.length > 0;
+
+      let userRole = null;
+
+      if (isCollaborative) {
+        /*
+         * Owner is stored in createdBy.
+         */
+        if (task.createdBy.toString() === userId) {
+          userRole = "owner";
+        } else {
+          /*
+           * Otherwise check participant role.
+           */
+          const participant = task.participants.find(
+            (participant) => participant.user.toString() === userId
+          );
+
+          if (participant) {
+            userRole = participant.role;
+          }
+        }
+
+        // STEP 5: Permission check
+        // Owner and editor can archive.
+        if (userRole !== "owner" && userRole !== "editor") {
+          const error = new Error(
+            "You do not have permission to archive this task"
+          );
+
+          error.statusCode = 403;
+          throw error;
+        }
+      } else {
+        /*
+         * Normal single task.
+         *
+         * Only the creator/owner can archive it.
+         */
+        if (task.createdBy.toString() !== userId) {
+          const error = new Error(
+            "You do not have permission to archive this task"
+          );
+
+          error.statusCode = 403;
+          throw error;
+        }
+
+        userRole = "owner";
+      }
+
+      // STEP 6: Archive task
+      task.isArchived = true;
+
+      await task.save({ session });
+
+      // STEP 7: Create activities and notifications
+      if (isCollaborative) {
+        /*
+         * Notify every participant except the person
+         * who performed the archive action.
+         */
+        const participantUserIds = task.participants
+          .map((participant) => participant.user.toString())
+          .filter((participantId) => participantId !== userId);
+
+        const activities = participantUserIds.map((participantId) => ({
+          todo: task._id,
+          actor: userId,
+          targetUser: participantId,
+          type: "TASK_ARCHIVED",
+          message: "Task was archived",
+          metadata: {
+            oldValue: false,
+            newValue: true,
+            role: userRole,
+          },
+        }));
+
+        const notifications = participantUserIds.map((participantId) => ({
+          user: participantId,
+          sender: userId,
+          type: "TASK_ARCHIVED",
+          title: "Task Archived",
+          message:
+            userRole === "owner"
+              ? "Task was archived by the owner"
+              : "Task was archived by an editor",
+          todo: task._id,
+          isRead: false,
+        }));
+
+        // Only insert if there is something to insert
+        if (activities.length > 0) {
+          await TaskActivity.insertMany(activities, { session });
+        }
+
+        if (notifications.length > 0) {
+          await Notification.insertMany(notifications, { session });
+        }
+      }
     });
 
-    //STEP:3 CHECK THE TASK IS FOUND OR NOT
-    if (!task) {
-      return res
-        .status(404)
-        .json(new ApiResponse(404, null, "Task not found", false));
-    }
-
-    //STEP:5 RESTORE THAT TASK
-    task.isArchived = true;
-    await task.save();
-
-    //STEP:6 RETURN SUCCESS MESSAGE TO THE USER
+    // STEP 8: Success response
     return res
       .status(200)
-      .json(new ApiResponse(200, task, "Task archive successfully", true));
+      .json(new ApiResponse(200, task, "Task archived successfully", true));
   } catch (error) {
+    console.error("archiveTask error:", error);
+
+    const statusCode = error.statusCode || 500;
+
     return res
-      .status(500)
-      .json(new ApiResponse(500, null, error.message, false));
+      .status(statusCode)
+      .json(
+        new ApiResponse(
+          statusCode,
+          null,
+          error.message || "Failed to archive task",
+          false
+        )
+      );
+  } finally {
+    // STEP 9: Always close MongoDB session
+    await session.endSession();
+  }
+};
+export const shareTodo = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { id } = req.params;
+    const { email, role } = req.body;
+
+    const userId = req.user.userId.toString();
+
+    // ==========================================
+    // STEP 1: Validate Task ID
+    // ==========================================
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task ID", false));
+    }
+
+    // ==========================================
+    // STEP 2: Validate Email
+    // ==========================================
+
+    if (!email || !email.trim()) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Email is required", false));
+    }
+
+    // ==========================================
+    // STEP 3: Validate Role
+    // ==========================================
+
+    const allowedRoles = ["viewer", "contributor", "editor"];
+
+    if (!role || !allowedRoles.includes(role)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid participant role", false));
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    let task;
+    let invitedUser;
+    let invite;
+    let notification;
+    let activity;
+    let message;
+
+    // ==========================================
+    // STEP 4: Transaction
+    // ==========================================
+
+    await session.withTransaction(async () => {
+      // ==========================================
+      // STEP 4.1: Find Task
+      // ==========================================
+
+      task = await SingleTodo.findOne({
+        _id: id,
+        createdBy: userId,
+        isArchived: false,
+        isDeleted: false,
+      }).session(session);
+
+      if (!task) {
+        const error = new Error("Task not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // ==========================================
+      // STEP 4.2: Find Invited User
+      // ==========================================
+
+      invitedUser = await User.findOne({
+        email: normalizedEmail,
+      })
+        .select("_id name email profileImage")
+        .session(session);
+
+      if (!invitedUser) {
+        const error = new Error("User not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // ==========================================
+      // STEP 4.3: Prevent Self Invitation
+      // ==========================================
+
+      if (invitedUser._id.toString() === userId) {
+        const error = new Error("You cannot invite yourself");
+
+        error.statusCode = 400;
+        throw error;
+      }
+
+      // ==========================================
+      // STEP 4.4: Check Friendship
+      // ==========================================
+
+      const isFriend = await User.exists({
+        _id: userId,
+        friends: invitedUser._id,
+      });
+
+      if (!isFriend) {
+        const error = new Error("User is not in your friend list");
+
+        error.statusCode = 403;
+        throw error;
+      }
+
+      // ==========================================
+      // STEP 4.5: Check Existing Member
+      // ==========================================
+
+      const alreadyMember = task.participants.some(
+        (participant) =>
+          participant.user.toString() === invitedUser._id.toString()
+      );
+
+      if (alreadyMember) {
+        const error = new Error("User is already a member of this task");
+
+        error.statusCode = 409;
+        throw error;
+      }
+
+      // ==========================================
+      // STEP 4.6: Check Existing Pending Invitation
+      // ==========================================
+
+      const pendingInvite = await Invite.findOne({
+        todo: task._id,
+        invitedUser: invitedUser._id,
+        status: "PENDING",
+      }).session(session);
+
+      if (pendingInvite) {
+        const error = new Error("User already has a pending invitation");
+
+        error.statusCode = 409;
+        throw error;
+      }
+
+      // ==========================================
+      // STEP 4.7: Create Invitation
+      // ==========================================
+
+      [invite] = await Invite.create(
+        [
+          {
+            todo: task._id,
+            invitedBy: userId,
+            invitedUser: invitedUser._id,
+            role,
+            status: "PENDING",
+          },
+        ],
+        { session }
+      );
+
+      // ==========================================
+      // STEP 4.8: Create Notification
+      // ==========================================
+
+      [notification] = await Notification.create(
+        [
+          {
+            user: invitedUser._id,
+            sender: userId,
+            type: "TASK_INVITE",
+            title: "Task Invitation",
+            message: `${req.user.name} invited you to join "${task.title}" as ${role}.`,
+            todo: task._id,
+            invite: invite._id,
+            isRead: false,
+          },
+        ],
+        { session }
+      );
+
+      // ==========================================
+      // STEP 4.9: Create Task Activity
+      // ==========================================
+
+      [activity] = await TaskActivity.create(
+        [
+          {
+            todo: task._id,
+            actor: userId,
+            targetUser: invitedUser._id,
+            type: "MEMBER_INVITED",
+            message: `${req.user.name} invited ${invitedUser.name} to join the task as ${role}.`,
+            metadata: {
+              extra: {
+                role,
+                invitedUserId: invitedUser._id,
+                inviteId: invite._id,
+              },
+            },
+          },
+        ],
+        { session }
+      );
+
+      // ==========================================
+      // STEP 4.10: Create Chat Message
+      // ==========================================
+
+      [message] = await Message.create(
+        [
+          {
+            sender: userId,
+            type: "TASK_INVITE",
+            invite: invite._id,
+            todo: task._id,
+            content: `${req.user.name} invited ${invitedUser.name} as ${role}.`,
+          },
+        ],
+        { session }
+      );
+    });
+
+    // ==========================================
+    // STEP 5: Emit Notification
+    // ==========================================
+
+    req.io.to(`user:${invitedUser._id.toString()}`).emit("notification", {
+      type: "TASK_INVITE",
+
+      notification: {
+        _id: notification._id,
+        title: notification.title,
+        message: notification.message,
+        isRead: notification.isRead,
+        createdAt: notification.createdAt,
+      },
+
+      sender: {
+        _id: req.user.userId,
+        name: req.user.name,
+        profileImage: req.user.profileImage,
+      },
+    });
+
+    // ==========================================
+    // STEP 6: Emit New Invitation
+    // ==========================================
+
+    req.io.to(`user:${invitedUser._id.toString()}`).emit("invite:new", {
+      invite: {
+        _id: invite._id,
+        role: invite.role,
+        status: invite.status,
+      },
+
+      task: {
+        _id: task._id,
+        title: task.title,
+      },
+
+      sender: {
+        _id: req.user.userId,
+        name: req.user.name,
+        profileImage: req.user.profileImage,
+      },
+    });
+
+    // ==========================================
+    // STEP 7: Emit Activity
+    // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("task:activity", activity);
+
+    // ==========================================
+    // STEP 8: Emit Task Update
+    // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("task:updated", {
+      action: "MEMBER_INVITED",
+
+      taskId: task._id,
+
+      participant: {
+        _id: invitedUser._id,
+        name: invitedUser.name,
+        email: invitedUser.email,
+        role,
+      },
+
+      invitedBy: {
+        _id: req.user.userId,
+        name: req.user.name,
+      },
+    });
+
+    // ==========================================
+    // STEP 9: Emit Chat Message
+    // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("message:new", {
+      message: {
+        _id: message._id,
+        type: message.type,
+        content: message.content,
+
+        sender: {
+          _id: req.user.userId,
+          name: req.user.name,
+          profileImage: req.user.profileImage,
+        },
+
+        createdAt: message.createdAt,
+      },
+    });
+
+    // ==========================================
+    // STEP 10: Response
+    // ==========================================
+
+    return res.status(201).json(
+      new ApiResponse(
+        201,
+        {
+          invite,
+          notification,
+          activity,
+        },
+        "Invitation sent successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("Share Todo Error:", error);
+
+    const statusCode = error.statusCode || 500;
+
+    return res
+      .status(statusCode)
+      .json(
+        new ApiResponse(
+          statusCode,
+          null,
+          error.message || "Failed to share task",
+          false
+        )
+      );
+  } finally {
+    await session.endSession();
   }
 };
