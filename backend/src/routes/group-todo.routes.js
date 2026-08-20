@@ -21,7 +21,7 @@ import {
   acceptGroupInvitation,
   rejectGroupInvitation,
   cloneGroupTask,
-  commentGroupTaks,
+  commentGroupTask,
   getCommentsGroupTasks,
   updateCommentsGroupTasks,
   getPendingTaskInvitations,
@@ -82,7 +82,7 @@ router
 router.route("/:id/duplicate").post(verifyJWT, cloneGroupTask);
 
 //router only collaborators can comment on task
-router.route("/:id/comment").post(verifyJWT, commentGroupTaks);
+router.route("/:id/comment").post(verifyJWT, commentGroupTask);
 
 //get comments
 router.route("/:id/comments").get(verifyJWT, getCommentsGroupTasks);

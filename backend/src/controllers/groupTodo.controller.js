@@ -907,7 +907,7 @@ const updateGroupTodoStatus = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-const deleteTodo = async (req, res) => {
+const deleteGroupTodo = async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -1122,7 +1122,7 @@ const getGroupTodoById = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-const archiveTodo = async (req, res) => {
+const archiveGroupTodo = async (req, res) => {
   try {
     // ==========================================
     // STEP 1: Get Task ID
@@ -1280,7 +1280,7 @@ const archiveTodo = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-const restoreDeletedTodo = async (req, res) => {
+const restoreDeletedGroupTodo = async (req, res) => {
   try {
     // ==========================================
     // STEP 1: Get Task ID
@@ -1439,7 +1439,7 @@ const restoreDeletedTodo = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
-const restoreArchivedTodo = async (req, res) => {
+const restoreArchiveGroupTodo = async (req, res) => {
   try {
     // ==========================================
     // STEP 1: Get Task ID
@@ -2744,7 +2744,7 @@ const acceptGroupInvitation = async (req, res) => {
     const user = await User.findById(req.user.userId);
 
     //SEND NOTIFICATION TO THE OWNER
-    const notification = await Notification.create({
+    notification = await Notification.create({
       user: ownerId, // Receiver (Task Owner)
       sender: req.user.userId, // User who accepted
       type: "TASK_ACCEPTED",
@@ -2828,8 +2828,6 @@ const rejectGroupInvitation = async (req, res) => {
 
     //STEP:6 UPDATE THE INVITE
     ((invite.status = "REJECTED"), await invite.save());
-
-    const user = await User.findById(req.user.userId);
 
     //STEP:8 CREATE NOTIFICATION
     let ownerId = invite.invitedBy;
@@ -3352,7 +3350,7 @@ export {
   acceptGroupInvitation,
   rejectGroupInvitation,
   cloneGroupTask,
-  commentGroupTaks,
+  commentGroupTask,
   getCommentsGroupTasks,
   updateCommentsGroupTasks,
   getPendingTaskInvitations,

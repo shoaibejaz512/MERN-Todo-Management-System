@@ -6,7 +6,7 @@ import { greenBright, redBright } from "colorette";
 
 import { app } from "./src/app.js";
 import { connect_db } from "./src/db/connectDb.js";
-import { connectRedis } from "./config/redis.js";
+import { connectRedis } from "./src/config/redis.config.js";
 import { initializeSocket } from "./src/socket/socket.js";
 
 const PORT = process.env.PORT || 8000;

@@ -2825,3 +2825,78 @@ export const shareTodo = async (req, res) => {
     await session.endSession();
   }
 };
+export const getTodoMembers = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // ==========================================
+    // STEP 1: VALIDATE TODO ID
+    // ==========================================
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid todo ID", false));
+    }
+
+    // ==========================================
+    // STEP 2: FIND TODO
+    // ==========================================
+
+    const task = await SingleTodo.findOne({
+      _id: id,
+      isArchived: false,
+      isDeleted: false,
+      $or: [
+        // Task owner
+        {
+          createdBy: req.user.userId,
+        },
+
+        // Task participant
+        {
+          "participants.user": req.user.userId,
+        },
+      ],
+    })
+      .populate("participants.user", "name email profileImage bio")
+      .populate("createdBy", "name email profileImage bio")
+      .select("title createdBy participants");
+
+    // ==========================================
+    // STEP 3: CHECK TODO EXISTS
+    // ==========================================
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Todo not found", false));
+    }
+
+    // ==========================================
+    // STEP 4: RETURN MEMBERS
+    // ==========================================
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          taskId: task._id,
+          title: task.title,
+
+          owner: task.createdBy,
+
+          members: task.participants,
+        },
+        "Todo members fetched successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("Get Todo Members Error:", error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Failed to fetch todo members", false));
+  }
+};

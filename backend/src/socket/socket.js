@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
 import { Todo } from "../models/todo.model.js";
-import { socketAuthMiddleware } from "./middleware/socketAuth.middleware.js";
+import { socketAuthMiddleware } from "../middlewears/socketAuth.middleware.js";
 import { green } from "colorette";
 
 export const initializeSocket = (io) => {
