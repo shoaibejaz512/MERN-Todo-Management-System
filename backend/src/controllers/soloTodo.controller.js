@@ -2900,3 +2900,261 @@ export const getTodoMembers = async (req, res) => {
       .json(new ApiResponse(500, null, "Failed to fetch todo members", false));
   }
 };
+export const updateTodoMemberRole = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { id, memberId } = req.params;
+    const { role } = req.body;
+
+    // ==========================================
+    // STEP 1: VALIDATE IDS
+    // ==========================================
+
+    if (
+      !mongoose.Types.ObjectId.isValid(id) ||
+      !mongoose.Types.ObjectId.isValid(memberId)
+    ) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "Invalid task ID or member ID", false)
+        );
+    }
+
+    // ==========================================
+    // STEP 2: VALIDATE ROLE
+    // ==========================================
+
+    const allowedRoles = ["viewer", "contributor", "editor"];
+
+    if (!allowedRoles.includes(role)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Invalid role. Allowed roles are viewer, contributor, and editor",
+            false
+          )
+        );
+    }
+
+    const userId = req.user.userId;
+
+    let updatedMember = null;
+    let activity = null;
+    let notification = null;
+
+    // ==========================================
+    // STEP 3: START TRANSACTION
+    // ==========================================
+
+    await session.withTransaction(async () => {
+      // ==========================================
+      // STEP 4: FIND TASK
+      // ==========================================
+
+      const task = await SingleTodo.findOne({
+        _id: id,
+        createdBy: userId,
+        isArchived: false,
+        isDeleted: false,
+        "participants.user": memberId,
+      }).session(session);
+
+      // ==========================================
+      // STEP 5: CHECK TASK
+      // ==========================================
+
+      if (!task) {
+        throw new Error("TASK_NOT_FOUND");
+      }
+
+      // ==========================================
+      // STEP 6: FIND MEMBER
+      // ==========================================
+
+      const member = task.participants.find(
+        (participant) => participant.user.toString() === memberId
+      );
+
+      if (!member) {
+        throw new Error("MEMBER_NOT_FOUND");
+      }
+
+      // ==========================================
+      // STEP 7: PREVENT OWNER ROLE CHANGE
+      // ==========================================
+
+      if (member.role === "owner") {
+        throw new Error("OWNER_ROLE_CANNOT_BE_CHANGED");
+      }
+
+      // ==========================================
+      // STEP 8: CHECK SAME ROLE
+      // ==========================================
+
+      if (member.role === role) {
+        throw new Error("SAME_ROLE");
+      }
+
+      // ==========================================
+      // STEP 9: STORE OLD ROLE
+      // ==========================================
+
+      const oldRole = member.role;
+
+      // ==========================================
+      // STEP 10: UPDATE MEMBER ROLE
+      // ==========================================
+
+      member.role = role;
+
+      await task.save({ session });
+
+      // ==========================================
+      // STEP 11: CREATE TASK ACTIVITY
+      // ==========================================
+
+      const createdActivity = await TaskActivity.create(
+        [
+          {
+            todo: task._id,
+            actor: userId,
+            targetUser: memberId,
+            type: "ROLE_CHANGED",
+            message: `Owner changed member role from ${oldRole} to ${role}`,
+            metadata: {
+              oldValue: oldRole,
+              newValue: role,
+            },
+          },
+        ],
+        { session }
+      );
+
+      activity = createdActivity[0];
+
+      // ==========================================
+      // STEP 12: CREATE NOTIFICATION
+      // ==========================================
+
+      const createdNotification = await Notification.create(
+        [
+          {
+            user: memberId,
+            sender: userId,
+            type: "TASK_UPDATED",
+            title: "Role Changed",
+            message: `Your role was changed from ${oldRole} to ${role}`,
+            todo: task._id,
+          },
+        ],
+        { session }
+      );
+
+      notification = createdNotification[0];
+
+      // ==========================================
+      // STEP 13: PREPARE RESPONSE
+      // ==========================================
+
+      updatedMember = {
+        user: member.user,
+        oldRole,
+        newRole: role,
+      };
+    });
+
+    // ==========================================
+    // STEP 14: EMIT TASK ACTIVITY
+    // ==========================================
+
+    io.to(`task:${id}`).emit("activity", activity);
+
+    // ==========================================
+    // STEP 15: EMIT NOTIFICATION TO MEMBER
+    // ==========================================
+
+    io.to(`user:${memberId}`).emit("notification", notification);
+
+    // ==========================================
+    // STEP 16: RETURN SUCCESS RESPONSE
+    // ==========================================
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          member: updatedMember,
+          activity,
+          notification,
+        },
+        "Member role updated successfully",
+        true
+      )
+    );
+  } catch (error) {
+    // ==========================================
+    // KNOWN ERRORS
+    // ==========================================
+
+    if (error.message === "TASK_NOT_FOUND") {
+      return res
+        .status(404)
+        .json(
+          new ApiResponse(
+            404,
+            null,
+            "Task not found or you do not have permission",
+            false
+          )
+        );
+    }
+
+    if (error.message === "MEMBER_NOT_FOUND") {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Member not found", false));
+    }
+
+    if (error.message === "OWNER_ROLE_CANNOT_BE_CHANGED") {
+      return res
+        .status(403)
+        .json(
+          new ApiResponse(
+            403,
+            null,
+            "The owner's role cannot be changed",
+            false
+          )
+        );
+    }
+
+    if (error.message === "SAME_ROLE") {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "Member already has this role", false)
+        );
+    }
+
+    // ==========================================
+    // UNEXPECTED ERROR
+    // ==========================================
+
+    console.error("Update Todo Member Role Error:", error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Failed to update member role", false));
+  } finally {
+    // ==========================================
+    // END SESSION
+    // ==========================================
+
+    await session.endSession();
+  }
+};
