@@ -3158,3 +3158,273 @@ export const updateTodoMemberRole = async (req, res) => {
     await session.endSession();
   }
 };
+export const removeTaskMember = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { id, memberId } = req.params;
+
+    // ==========================================
+    // STEP 1: Validate IDs
+    // ==========================================
+
+    if (
+      !mongoose.Types.ObjectId.isValid(id) ||
+      !mongoose.Types.ObjectId.isValid(memberId)
+    ) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "Invalid task ID or member ID", false)
+        );
+    }
+
+    const userId = req.user.userId.toString();
+
+    // ==========================================
+    // STEP 2: Find Task
+    // Only task owner can remove members
+    // ==========================================
+
+    const task = await SingleTodo.findOne({
+      _id: id,
+      createdBy: req.user.userId,
+      isDeleted: false,
+      isArchived: false,
+    });
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    // ==========================================
+    // STEP 3: Find Member
+    // ==========================================
+
+    const member = task.participants.find(
+      (participant) => participant.user.toString() === memberId.toString()
+    );
+
+    if (!member) {
+      return res
+        .status(404)
+        .json(
+          new ApiResponse(404, null, "User is not a member of this task", false)
+        );
+    }
+
+    // ==========================================
+    // STEP 4: Prevent Owner Removal
+    // ==========================================
+    // The task owner should never be removed from
+    // their own task.
+    // ==========================================
+
+    if (member.role === "owner") {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "The task owner cannot be removed.", false)
+        );
+    }
+
+    // ==========================================
+    // STEP 5: Prevent Self Removal
+    // ==========================================
+    // If the owner wants to leave the task, they
+    // should use a separate leave-task workflow.
+    // ==========================================
+
+    if (memberId.toString() === userId) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "You cannot remove yourself. Use leave task instead.",
+            false
+          )
+        );
+    }
+
+    // ==========================================
+    // STEP 6: Get Member Information
+    // ==========================================
+    // Store the old role before removing the member.
+    // This information can be useful in activity logs.
+    // ==========================================
+
+    const removedRole = member.role;
+
+    let updatedTask;
+    let activity;
+    let notification;
+
+    // ==========================================
+    // STEP 7: Transaction
+    // ==========================================
+
+    await session.withTransaction(async () => {
+      // ------------------------------------------
+      // Remove Member
+      // ------------------------------------------
+      // $pull removes the participant whose user
+      // ID matches the member being removed.
+      // ------------------------------------------
+
+      updatedTask = await SingleTodo.findOneAndUpdate(
+        {
+          _id: id,
+          createdBy: req.user.userId,
+          isDeleted: false,
+          isArchived: false,
+        },
+        {
+          $pull: {
+            participants: {
+              user: memberId,
+            },
+          },
+        },
+        {
+          new: true,
+          session,
+        }
+      );
+
+      if (!updatedTask) {
+        const error = new Error("Task could not be updated.");
+
+        error.statusCode = 500;
+
+        throw error;
+      }
+
+      // ------------------------------------------
+      // Create Task Activity
+      // ------------------------------------------
+      // targetUser identifies the member who was
+      // removed from the task.
+      //
+      // This activity becomes part of the task's
+      // permanent activity/history timeline.
+      // ------------------------------------------
+
+      [activity] = await TaskActivity.create(
+        [
+          {
+            todo: task._id,
+            actor: req.user.userId,
+            targetUser: memberId,
+            type: "MEMBER_REMOVED",
+            message: `${req.user.name} removed a member from the task.`,
+            metadata: {
+              oldValue: removedRole,
+              extra: {
+                removedUserId: memberId,
+                removedRole,
+              },
+            },
+          },
+        ],
+        {
+          session,
+        }
+      );
+
+      // ------------------------------------------
+      // Create Notification
+      // ------------------------------------------
+      // The removed member receives a personal
+      // notification informing them that they were
+      // removed from this task.
+      // ------------------------------------------
+
+      [notification] = await Notification.create(
+        [
+          {
+            user: memberId,
+            sender: req.user.userId,
+            type: "MEMBER_REMOVED",
+            title: "Removed from task",
+            message: `You have been removed from "${task.title}".`,
+            todo: task._id,
+            isRead: false,
+          },
+        ],
+        {
+          session,
+        }
+      );
+    });
+
+    // ==========================================
+    // STEP 8: Notify Removed Member
+    // ==========================================
+    // The database transaction has already committed,
+    // so it is now safe to emit the real-time event.
+    // ==========================================
+
+    req.io.to(`user:${memberId.toString()}`).emit("notification", notification);
+
+    // ==========================================
+    // STEP 9: Emit Activity
+    // ==========================================
+    // Everyone currently connected to this task room
+    // receives the activity update in real time.
+    // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("task:activity", activity);
+
+    // ==========================================
+    // STEP 10: Emit Member Removed Event
+    // ==========================================
+    // Frontend can use this event to immediately
+    // remove the member from the task UI.
+    // ==========================================
+
+    req.io.to(`task:${task._id.toString()}`).emit("task:member-removed", {
+      taskId: task._id,
+      member: {
+        userId: memberId,
+        role: removedRole,
+      },
+      removedBy: {
+        _id: req.user.userId,
+        name: req.user.name,
+      },
+    });
+
+    // ==========================================
+    // STEP 11: Response
+    // ==========================================
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(200, updatedTask, "Member removed successfully.", true)
+      );
+  } catch (error) {
+    console.error("Remove Task Member Error:", error);
+
+    return res
+      .status(error.statusCode || 500)
+      .json(
+        new ApiResponse(
+          error.statusCode || 500,
+          null,
+          error.message || "Failed to remove task member.",
+          false
+        )
+      );
+  } finally {
+    // ==========================================
+    // Always close MongoDB session
+    // ==========================================
+
+    await session.endSession();
+  }
+};

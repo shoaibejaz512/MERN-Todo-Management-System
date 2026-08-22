@@ -2411,8 +2411,6 @@ const removeMember = async (req, res) => {
     await session.endSession();
   }
 };
-
-//TO BE CONTINUE TO ADDED TASK_AKTIVITY AND NOTIFICATION LOGIC AND SOCKET LOGIC
 const leaveGroupTodo = async (req, res) => {
   try {
     const { id } = req.params;
