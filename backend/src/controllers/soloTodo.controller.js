@@ -3428,3 +3428,193 @@ export const removeTaskMember = async (req, res) => {
     await session.endSession();
   }
 };
+export const leaveTaskGroup = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    // ==========================================
+    // STEP 1: Validate Task ID
+    // ==========================================
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task ID", false));
+    }
+
+    let todo;
+    let notifications = [];
+
+    await session.withTransaction(async () => {
+      // ==========================================
+      // STEP 2: Find Task + Verify Membership
+      // ==========================================
+
+      todo = await SingleTodo.findOne({
+        _id: id,
+        isArchived: false,
+        isDeleted: false,
+        "participants.user": userId,
+      }).session(session);
+
+      if (!todo) {
+        const error = new Error("Task not found or you are not a participant");
+
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // ==========================================
+      // STEP 3: Find Current Participant
+      // ==========================================
+
+      const currentParticipant = todo.participants.find(
+        (participant) => participant.user.toString() === userId.toString()
+      );
+
+      if (!currentParticipant) {
+        const error = new Error("You are not a participant of this task");
+
+        error.statusCode = 403;
+        throw error;
+      }
+
+      // ==========================================
+      // STEP 4: Owner Cannot Leave
+      // ==========================================
+
+      if (currentParticipant.role === "owner") {
+        const error = new Error("Task owner cannot leave the group");
+
+        error.statusCode = 403;
+        throw error;
+      }
+
+      // ==========================================
+      // STEP 5: Get Remaining Participants
+      // ==========================================
+
+      const remainingParticipants = todo.participants
+        .filter(
+          (participant) => participant.user.toString() !== userId.toString()
+        )
+        .map((participant) => participant.user);
+
+      // ==========================================
+      // STEP 6: Remove Participant
+      // ==========================================
+
+      await SingleTodo.updateOne(
+        {
+          _id: id,
+          "participants.user": userId,
+        },
+        {
+          $pull: {
+            participants: {
+              user: userId,
+            },
+          },
+        },
+        {
+          session,
+        }
+      );
+
+      // ==========================================
+      // STEP 7: Create Task Activity
+      // ==========================================
+
+      await TaskActivity.create(
+        [
+          {
+            todo: todo._id,
+            actor: userId,
+            targetUser: userId,
+            type: "MEMBER_LEFT",
+            message: "A member left the task group",
+          },
+        ],
+        {
+          session,
+        }
+      );
+
+      // ==========================================
+      // STEP 8: Create Notifications
+      // ==========================================
+
+      if (remainingParticipants.length > 0) {
+        const notificationData = remainingParticipants.map((participantId) => ({
+          user: participantId,
+          sender: userId,
+          type: "MEMBER_LEFT",
+          title: "Member left the task",
+          message: `A member has left the task group "${todo.title}"`,
+          todo: todo._id,
+        }));
+
+        notifications = await Notification.insertMany(notificationData, {
+          session,
+        });
+      }
+    });
+
+    // ==========================================
+    // STEP 9: Emit Task Activity
+    // ==========================================
+
+    io.to(`task:${id}`).emit("task:activity", {
+      type: "MEMBER_LEFT",
+      todo: id,
+      actor: userId,
+      targetUser: userId,
+      message: "A member left the task group",
+    });
+
+    // ==========================================
+    // STEP 10: Emit Notifications
+    // ==========================================
+
+    notifications.forEach((notification) => {
+      io.to(`user:${notification.user.toString()}`).emit(
+        "notification:leave",
+        notification
+      );
+    });
+
+    // ==========================================
+    // STEP 11: Response
+    // ==========================================
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          taskId: todo._id,
+          userId,
+        },
+        "You have successfully left the task group",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("leaveTaskGroup Error:", error);
+
+    return res
+      .status(error.statusCode || 500)
+      .json(
+        new ApiResponse(
+          error.statusCode || 500,
+          null,
+          error.message || "Failed to leave task group",
+          false
+        )
+      );
+  } finally {
+    await session.endSession();
+  }
+};
