@@ -3618,3 +3618,32 @@ export const leaveTaskGroup = async (req, res) => {
     await session.endSession();
   }
 };
+export const getTaskPendingInvites = async (req, res) => {
+  try {
+    const pending_invitations = await Invite.find({
+      invitedUser: req.user.userId,
+      status: "PENDING",
+    });
+
+    if (pending_invitations.length === 0) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, [], "No pending invitations found", true));
+    }
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          { invitations: pending_invitations },
+          "Pending invitations",
+          true
+        )
+      );
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
