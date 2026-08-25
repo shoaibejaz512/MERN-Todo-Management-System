@@ -3618,26 +3618,86 @@ export const leaveTaskGroup = async (req, res) => {
     await session.endSession();
   }
 };
-export const getTaskPendingInvites = async (req, res) => {
+export const getAllPendingInvitations = async (req, res) => {
   try {
-    const pending_invitations = await Invite.find({
+    const pendingInvitations = await Invite.find({
       invitedUser: req.user.userId,
       status: "PENDING",
-    });
-
-    if (pending_invitations.length === 0) {
-      return res
-        .status(404)
-        .json(new ApiResponse(404, [], "No pending invitations found", true));
-    }
+    })
+      .populate("todo", "title description priority deadline")
+      .populate("inviter", "name email profileImage")
+      .sort({ createdAt: -1 });
 
     return res
       .status(200)
       .json(
         new ApiResponse(
           200,
-          { invitations: pending_invitations },
-          "Pending invitations",
+          { invitations: pendingInvitations },
+          pendingInvitations.length
+            ? "Pending invitations retrieved successfully"
+            : "No pending invitations found",
+          true
+        )
+      );
+  } catch (error) {
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
+
+export const getTaskPendingInvitations = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    // ==========================================
+    // VALIDATE TASK ID
+    // ==========================================
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task id", false));
+    }
+
+    // ==========================================
+    // VERIFY TASK OWNERSHIP
+    // ==========================================
+
+    const todo = await SingleTodo.findOne({
+      _id: id,
+      createdBy: req.user.userId,
+      isArchived: false,
+      isDeleted: false,
+    });
+
+    if (!todo) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    // ==========================================
+    // GET PENDING INVITATIONS
+    // ==========================================
+
+    const pendingInvitations = await Invite.find({
+      todo: id,
+      status: "PENDING",
+    })
+      .populate("invitedUser", "name email profileImage")
+      .sort({ createdAt: -1 });
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          { invitations: pendingInvitations },
+          pendingInvitations.length
+            ? "Pending invitations retrieved successfully"
+            : "No pending invitations found",
           true
         )
       );

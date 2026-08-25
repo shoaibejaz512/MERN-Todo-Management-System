@@ -2598,7 +2598,12 @@ const getPendingTaskInvitations = async (req, res) => {
     }
 
     //STEP:2 FIDN TASK
-    const task = await Todo.findById(id);
+    const task = await Todo.findByOne({
+      _id:id,
+      createdBy:req.user.userId,
+      isArchived:false,
+      isDeleted:false,
+    });
 
     if (!task) {
       return res
