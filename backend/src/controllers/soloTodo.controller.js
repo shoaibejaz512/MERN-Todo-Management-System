@@ -3707,3 +3707,314 @@ export const getTaskPendingInvitations = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
+export const acceptInvitation = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { inviteId } = req.params;
+    const userId = req.user.userId;
+
+    // =====================================================
+    // STEP 1: VALIDATE INVITATION ID
+    // =====================================================
+
+    if (!mongoose.Types.ObjectId.isValid(inviteId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid invitation id", false));
+    }
+
+    let updatedTask;
+    let acceptedInvite;
+    let notifications = [];
+    let activity;
+    let user;
+
+    // =====================================================
+    // GET ACCEPTING USER
+    // =====================================================
+
+    user = await User.findById(userId).select("name");
+
+    if (!user) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
+    }
+
+    // =====================================================
+    // TRANSACTION
+    // =====================================================
+
+    await session.withTransaction(async () => {
+      // ===================================================
+      // STEP 2: FIND INVITATION
+      // ===================================================
+
+      const invite = await Invite.findOne({
+        _id: inviteId,
+        invitedUser: userId,
+        isInviteAccepted: false,
+        status: "PENDING",
+      }).session(session);
+
+      // ===================================================
+      // STEP 3: CHECK INVITATION
+      // ===================================================
+
+      if (!invite) {
+        throw new ApiError(404, "Invitation not found or already processed");
+      }
+
+      // ===================================================
+      // STEP 4: FIND TASK
+      // ===================================================
+
+      const task = await SingleTodo.findOne({
+        _id: invite.todo,
+        isDeleted: false,
+        isArchived: false,
+      }).session(session);
+
+      if (!task) {
+        throw new ApiError(404, "Task not found");
+      }
+
+      // ===================================================
+      // STEP 5: OWNER CANNOT ACCEPT HIS OWN INVITATION
+      // ===================================================
+
+      if (task.createdBy.toString() === userId.toString()) {
+        throw new ApiError(400, "Task owner cannot accept an invitation");
+      }
+
+      // ===================================================
+      // STEP 6: CHECK USER ALREADY EXISTS
+      // ===================================================
+
+      const alreadyParticipant = task.participants.some(
+        (participant) => participant.user.toString() === userId.toString()
+      );
+
+      if (alreadyParticipant) {
+        throw new ApiError(409, "You are already a participant of this task");
+      }
+
+      // ===================================================
+      // STEP 7: ADD USER TO PARTICIPANTS
+      // ===================================================
+
+      updatedTask = await SingleTodo.findOneAndUpdate(
+        {
+          _id: task._id,
+          isDeleted: false,
+          isArchived: false,
+
+          // Important:
+          // Prevent duplicate participant
+          "participants.user": {
+            $ne: userId,
+          },
+        },
+        {
+          $push: {
+            participants: {
+              user: userId,
+              role: invite.role,
+            },
+          },
+        },
+        {
+          new: true,
+          session,
+        }
+      );
+
+      if (!updatedTask) {
+        throw new ApiError(409, "You are already a participant of this task");
+      }
+
+      // ===================================================
+      // STEP 8: ACCEPT INVITATION
+      // ===================================================
+
+      invite.status = "ACCEPTED";
+      invite.isInviteAccepted = true;
+
+      await invite.save({ session });
+
+      acceptedInvite = invite;
+
+      // ===================================================
+      // STEP 9: FIND ALL NOTIFICATION RECIPIENTS
+      // ===================================================
+
+      /*
+        We want:
+
+        OWNER        → Notification
+        MEMBER 1     → Notification
+        MEMBER 2     → Notification
+        MEMBER 3     → Notification
+
+        ACCEPTED USER → NO notification
+      */
+
+      const recipientIds = new Set();
+
+      // Add owner
+      recipientIds.add(task.createdBy.toString());
+
+      // Add existing participants
+      for (const participant of task.participants) {
+        const participantId = participant.user.toString();
+
+        if (participantId !== userId.toString()) {
+          recipientIds.add(participantId);
+        }
+      }
+
+      // ===================================================
+      // STEP 10: CREATE NOTIFICATIONS
+      // ===================================================
+
+      notifications = Array.from(recipientIds).map((recipientId) => {
+        const isOwner = recipientId === task.createdBy.toString();
+
+        return {
+          user: recipientId,
+          sender: userId,
+
+          type: isOwner ? "TASK_ACCEPTED" : "TASK_MEMBER_JOINED",
+
+          title: isOwner ? "Invitation Accepted" : "New Member Joined",
+
+          message: isOwner
+            ? `${user.name} accepted your invitation.`
+            : `${user.name} joined the task.`,
+
+          todo: updatedTask._id,
+          invite: acceptedInvite._id,
+        };
+      });
+
+      if (notifications.length > 0) {
+        await Notification.insertMany(notifications, {
+          session,
+        });
+      }
+
+      // ===================================================
+      // STEP 11: CREATE TASK ACTIVITY
+      // ===================================================
+
+      const [createdActivity] = await TaskActivity.create(
+        [
+          {
+            todo: updatedTask._id,
+
+            // User who accepted invitation
+            actor: userId,
+
+            // User who joined the task
+            targetUser: userId,
+
+            type: "MEMBER_JOINED",
+
+            message: `${user.name} joined the task.`,
+
+            metadata: {
+              extra: {
+                role: acceptedInvite.role,
+                invite: acceptedInvite._id,
+              },
+            },
+          },
+        ],
+        {
+          session,
+        }
+      );
+
+      activity = createdActivity;
+    });
+
+    // =====================================================
+    // TRANSACTION SUCCESSFULLY COMMITTED
+    // NOW EMIT SOCKET EVENTS
+    // =====================================================
+
+    // Assuming:
+    // const io = req.app.get("io");
+
+    const io = req.app.get("io");
+
+    if (io) {
+      // ===================================================
+      // STEP 12: EMIT NOTIFICATION TO OWNER + MEMBERS
+      // ===================================================
+
+      for (const notification of notifications) {
+        io.to(`user:${notification.user.toString()}`).emit(
+          "notification:new",
+          notification
+        );
+      }
+
+      // ===================================================
+      // STEP 13: EMIT ACTIVITY TO TASK ROOM
+      // ===================================================
+
+      io.to(`task:${updatedTask._id.toString()}`).emit(
+        "task:activity",
+        activity
+      );
+
+      // ===================================================
+      // STEP 14: EMIT MEMBER JOINED EVENT
+      // ===================================================
+
+      io.to(`task:${updatedTask._id.toString()}`).emit("task:member-joined", {
+        todoId: updatedTask._id,
+        userId,
+        role: acceptedInvite.role,
+      });
+    }
+
+    // =====================================================
+    // STEP 15: SUCCESS RESPONSE
+    // =====================================================
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          updatedTask,
+          "Invitation accepted successfully",
+          true
+        )
+      );
+  } catch (error) {
+    console.error("Accept invitation error:", error);
+
+    if (error instanceof ApiError) {
+      return res
+        .status(error.statusCode)
+        .json(new ApiResponse(error.statusCode, null, error.message, false));
+    }
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          error.message || "Failed to accept invitation",
+          false
+        )
+      );
+  } finally {
+    await session.endSession();
+  }
+};
