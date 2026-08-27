@@ -36,6 +36,7 @@ const taskActivitySchema = new mongoose.Schema(
         "MEMBER_LEFT",
         "MEMBER_REMOVED",
         "ROLE_CHANGED",
+        "TASK_REJECTED",
 
         "TASK_UPDATED",
         "TITLE_UPDATED",

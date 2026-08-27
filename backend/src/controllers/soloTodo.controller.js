@@ -4018,3 +4018,144 @@ export const acceptInvitation = async (req, res) => {
     await session.endSession();
   }
 };
+export const declineInvitation = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { inviteId } = req.params;
+    const userId = req.user.userId;
+
+    if (!mongoose.Types.ObjectId.isValid(inviteId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid invitation id", false));
+    }
+
+    let invitation;
+    let task;
+    let notification;
+    let activity;
+
+    await session.withTransaction(async () => {
+      // STEP 1: Find invitation
+      invitation = await Invite.findOne({
+        _id: inviteId,
+        invitedUser: userId,
+        status: "PENDING",
+      }).session(session);
+
+      if (!invitation) {
+        const error = new Error("Invitation not found or already processed");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // STEP 2: Find task
+      task = await SingleTodo.findOne({
+        _id: invitation.todo,
+        createdBy: invitation.invitedBy,
+        isArchived: false,
+        isDeleted: false,
+      }).session(session);
+
+      if (!task) {
+        const error = new Error("Task not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // STEP 3: Get inviter and invited user's names
+      const [sender, actor] = await Promise.all([
+        User.findById(invitation.invitedBy).select("name").session(session),
+
+        User.findById(userId).select("name").session(session),
+      ]);
+
+      if (!sender) {
+        const error = new Error("Invitation sender not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      if (!actor) {
+        const error = new Error("User not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // STEP 4: Reject invitation
+      invitation.status = "REJECTED";
+      invitation.isInviteAccepted = false;
+
+      await invitation.save({ session });
+
+      // STEP 5: Create notification
+      notification = await Notification.create(
+        [
+          {
+            user: invitation.invitedBy,
+            sender: userId,
+            type: "TASK_REJECTED",
+            title: "Invitation rejected",
+            message: `${actor.name} rejected your invitation to join "${task.title}"`,
+            todo: task._id,
+            invite: invitation._id,
+          },
+        ],
+        { session }
+      );
+
+      notification = notification[0];
+
+      // STEP 6: Create activity
+      activity = await TaskActivity.create(
+        [
+          {
+            todo: task._id,
+            actor: userId,
+            targetUser: invitation.invitedBy,
+            type: "TASK_REJECTED",
+            message: `${actor.name} rejected the invitation sent by ${sender.name}`,
+            metadata: {
+              oldValue: "PENDING",
+              newValue: "REJECTED",
+            },
+          },
+        ],
+        { session }
+      );
+
+      activity = activity[0];
+    });
+
+    // Emit events only after transaction successfully commits
+    io.to(`user:${invitation.invitedBy}`).emit(
+      "notification:rejected",
+      notification
+    );
+
+    io.to(`task:${task._id}`).emit("activity", activity);
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          invitation,
+          taskId: task._id,
+        },
+        "Invitation rejected successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("Decline invitation error:", error);
+
+    const statusCode = error.statusCode || 500;
+
+    return res
+      .status(statusCode)
+      .json(new ApiResponse(statusCode, null, error.message, false));
+  } finally {
+    await session.endSession();
+  }
+};
