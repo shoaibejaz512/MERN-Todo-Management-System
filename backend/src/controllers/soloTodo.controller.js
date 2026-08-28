@@ -4159,3 +4159,254 @@ export const declineInvitation = async (req, res) => {
     await session.endSession();
   }
 };
+
+export const cloneSingleTask = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { id } = req.params;
+    const userId = req.user.userId;
+
+    // STEP 1: Validate task ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task id", false));
+    }
+
+    let task;
+    let clonedTask;
+    let notification = null;
+    let activity = null;
+
+    await session.withTransaction(async () => {
+      // STEP 2: Find original task
+      task = await SingleTodo.findOne({
+        _id: id,
+        isArchived: false,
+        isDeleted: false,
+      }).session(session);
+
+      if (!task) {
+        const error = new Error("Task not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // STEP 3: Check authorization
+      let allowed = false;
+
+      // Task owner
+      if (task.createdBy.toString() === userId.toString()) {
+        allowed = true;
+      } else {
+        // Check participant
+        const participant = task.participants?.find(
+          (p) => p.user.toString() === userId.toString()
+        );
+
+        if (
+          participant &&
+          ["owner", "editor", "contributor"].includes(participant.role)
+        ) {
+          allowed = true;
+        }
+      }
+
+      if (!allowed) {
+        const error = new Error(
+          "You don't have permission to clone this task."
+        );
+
+        error.statusCode = 403;
+        throw error;
+      }
+
+      // STEP 4: Get actor and target user names
+      const [actor, targetUser] = await Promise.all([
+        // Actor = user cloning the task
+        User.findById(userId)
+          .select("name")
+          .session(session),
+
+        // Target = original task owner
+        User.findById(task.createdBy)
+          .select("name")
+          .session(session),
+      ]);
+
+      if (!actor) {
+        const error = new Error("User not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      if (!targetUser) {
+        const error = new Error("Task owner not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // STEP 5: Create cloned task
+      [clonedTask] = await SingleTodo.create(
+        [
+          {
+            title: `${task.title} (Copy)`,
+            description: task.description,
+            source: task.source,
+            priority: task.priority,
+            estimatedHours: task.estimatedHours,
+            deadline: task.deadline,
+            tags: [...task.tags],
+
+            // New owner
+            createdBy: userId,
+
+            // Don't copy participants
+            participants: [],
+
+            // Don't copy subtasks
+            SubTodos: [],
+
+            // Don't copy invitations
+            taskInvitations: [],
+
+            // Fresh task
+            status: "START",
+            isArchived: false,
+            isDeleted: false,
+            deletedAt: null,
+          },
+        ],
+        { session }
+      );
+
+      // STEP 6: Add cloned task to user's account
+      await User.findByIdAndUpdate(
+        userId,
+        {
+          $push: {
+            groupTasks: clonedTask._id,
+          },
+          $inc: {
+            totalGroupTasks: 1,
+          },
+        },
+        { session }
+      );
+
+      // STEP 7: Create notification and activity
+      // Only notify original owner when another user clones the task
+      if (task.createdBy.toString() !== userId.toString()) {
+        // ---------------------------------------------------------
+        // NOTIFICATION
+        // ---------------------------------------------------------
+
+        const notificationResult = await Notification.create(
+          [
+            {
+              // Target user
+              user: task.createdBy,
+
+              // Actor
+              sender: userId,
+
+              type: "TASK_CLONED",
+
+              title: "Task cloned",
+
+              message: `${actor.name} cloned your task "${task.title}"`,
+
+              // Your existing Notification schema uses "todo"
+              todo: task._id,
+
+              isRead: false,
+            },
+          ],
+          { session }
+        );
+
+        notification = notificationResult[0];
+
+        // ---------------------------------------------------------
+        // ACTIVITY
+        // ---------------------------------------------------------
+
+        const activityResult = await TaskActivity.create(
+          [
+            {
+              // Original task
+              todo: task._id,
+
+              // Actor = person who cloned
+              actor: userId,
+
+              // Target = original owner
+              targetUser: task.createdBy,
+
+              type: "TASK_CLONED",
+
+              message: `${actor.name} cloned ${targetUser.name}'s task "${task.title}"`,
+
+              metadata: {
+                clonedTaskId: clonedTask._id,
+              },
+            },
+          ],
+          { session }
+        );
+
+        activity = activityResult[0];
+      }
+    });
+
+    // =========================================================
+    // STEP 8: Emit realtime events AFTER transaction commits
+    // =========================================================
+
+    if (notification) {
+      io.to(`user:${notification.user}`).emit(
+        "notification:cloned",
+        notification
+      );
+    }
+
+    if (activity) {
+      io.to(`task:${task._id}`).emit("activity", activity);
+    }
+
+    // =========================================================
+    // STEP 9: Return response
+    // =========================================================
+
+    return res.status(201).json(
+      new ApiResponse(
+        201,
+        {
+          task: clonedTask,
+          notification,
+          activity,
+        },
+        "Task cloned successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("Clone single task error:", error);
+
+    const statusCode = error.statusCode || 500;
+
+    return res
+      .status(statusCode)
+      .json(
+        new ApiResponse(
+          statusCode,
+          null,
+          error.message || "Failed to clone task",
+          false
+        )
+      );
+  } finally {
+    await session.endSession();
+  }
+};

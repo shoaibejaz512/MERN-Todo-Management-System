@@ -2860,7 +2860,7 @@ const rejectGroupInvitation = async (req, res) => {
   }
 };
 const cloneGroupTask = async (req, res) => {
-  const session = await Mongoose.startSession();
+  const session = await mongoose.startSession();
 
   try {
     session.startTransaction();
@@ -2868,7 +2868,7 @@ const cloneGroupTask = async (req, res) => {
     const { id } = req.params;
 
     // STEP 1: Validate Task ID
-    if (!Mongoose.Types.ObjectId.isValid(id)) {
+    if (!mongoose.Types.ObjectId.isValid(id)) {
       await session.abortTransaction();
 
       return res
