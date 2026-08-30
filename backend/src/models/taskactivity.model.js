@@ -52,6 +52,7 @@ const taskActivitySchema = new mongoose.Schema(
         "TASK_REOPENED",
         "TASK_ARCHIVED",
         "TASK_RESTORED",
+        "TASK_COMMENT",
         "TASK_CLONE",
       ],
     },

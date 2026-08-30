@@ -7,6 +7,7 @@ import { Notification } from "../models/notification.model.js";
 import { TaskActivity } from "../models/taskactivity.model.js";
 import { Invite } from "../models/invite.model.js";
 import { io } from "../../server.js";
+import { Comment } from "../models/comment.model.js";
 
 // controllers/todo.controller.js
 
@@ -4410,3 +4411,214 @@ export const cloneSingleTask = async (req, res) => {
     await session.endSession();
   }
 };
+export const commentTask = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { id } = req.params;
+    const { message } = req.body;
+    const userId = req.user.userId.toString();
+
+    // =========================================================
+    // STEP 1: Validate task ID
+    // =========================================================
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task id", false));
+    }
+
+    // =========================================================
+    // STEP 2: Validate message
+    // =========================================================
+
+    if (!message || !message.trim()) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Message is required", false));
+    }
+
+    let comment;
+
+    await session.withTransaction(async () => {
+      // =======================================================
+      // STEP 3: Find task
+      // =======================================================
+
+      const task = await SingleTodo.findOne({
+        _id: id,
+        isArchived: false,
+        isDeleted: false,
+      }).session(session);
+
+      if (!task) {
+        const error = new Error("Task not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // =======================================================
+      // STEP 4: Authorization
+      // =======================================================
+
+      const isOwner = task.createdBy.toString() === userId;
+
+      const isParticipant = task.participants.some(
+        (participant) => participant.user.toString() === userId
+      );
+
+      if (!isOwner && !isParticipant) {
+        const error = new Error(
+          "You are not allowed to comment on this task"
+        );
+
+        error.statusCode = 403;
+        throw error;
+      }
+
+      // =======================================================
+      // STEP 5: Create comment
+      // =======================================================
+
+      const newComment = new Comment({
+        todo: task._id,
+        user: userId,
+        message: message.trim(),
+      });
+
+      await newComment.save({ session });
+
+      comment = newComment;
+
+      // =======================================================
+      // STEP 6: Attach comment to task
+      // =======================================================
+
+      task.comments.push(comment._id);
+
+      await task.save({ session });
+
+      // =======================================================
+      // STEP 7: Build recipients
+      //
+      // If OWNER comments:
+      //     No notification
+      //
+      // If PARTICIPANT comments:
+      //     Notify owner + other participants
+      // =======================================================
+
+      let uniqueRecipients = [];
+
+      if (!isOwner) {
+        const recipients = [
+          task.createdBy.toString(),
+          ...task.participants.map((participant) =>
+            participant.user.toString()
+          ),
+        ];
+
+        // Remove duplicates + remove commenter
+        uniqueRecipients = [
+          ...new Set(recipients),
+        ].filter((recipientId) => recipientId !== userId);
+      }
+
+      // =======================================================
+      // STEP 8: Create notifications
+      // =======================================================
+
+      if (uniqueRecipients.length > 0) {
+        const notifications = uniqueRecipients.map((recipientId) => ({
+          user: recipientId,
+          sender: userId,
+          todo: task._id,
+          type: "TASK_COMMENTED",
+          title: "New Task Comment",
+          message: `${req.user.name} commented on the task.`,
+        }));
+
+        await Notification.insertMany(notifications, {
+          session,
+        });
+      }
+
+      // =======================================================
+      // STEP 9: Create task activities
+      //
+      // Activity is useful for the task history/audit timeline.
+      // We create activity for every recipient.
+      // =======================================================
+
+      if (uniqueRecipients.length > 0) {
+        const activities = uniqueRecipients.map((recipientId) => ({
+          todo: task._id,
+          actor: userId,
+          targetUser: recipientId,
+          type: "TASK_COMMENT",
+          message: `${req.user.name} commented on the task.`,
+        }));
+
+        await TaskActivity.insertMany(activities, {
+          session,
+        });
+      }
+
+      // =======================================================
+      // STEP 10: Populate comment author
+      //
+      // Populate inside transaction so returned comment is ready.
+      // =======================================================
+
+      await comment.populate({
+        path: "user",
+        select: "name email profileImage",
+      });
+    });
+
+    // =========================================================
+    // STEP 11: Emit Socket.io event AFTER transaction succeeds
+    // =========================================================
+
+    req.io.to(`task:${id}`).emit("task:comment-added", {
+      taskId: id,
+      comment,
+    });
+
+    // =========================================================
+    // STEP 12: Success response
+    // =========================================================
+
+    return res
+      .status(201)
+      .json(
+        new ApiResponse(
+          201,
+          comment,
+          "Comment added successfully",
+          true
+        )
+      );
+  } catch (error) {
+    console.error("commentTask error:", error);
+
+    const statusCode = error.statusCode || 500;
+
+    return res
+      .status(statusCode)
+      .json(
+        new ApiResponse(
+          statusCode,
+          null,
+          error.statusCode
+            ? error.message
+            : "Internal Server Error",
+          false
+        )
+      );
+  } finally {
+    await session.endSession();
+  }
+};
+
