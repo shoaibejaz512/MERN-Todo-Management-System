@@ -4684,3 +4684,307 @@ export const getCommentTasks = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
+
+export const updateCommentTask = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { taskId, commentId } = req.params;
+    const { message } = req.body;
+
+    const userId = req.user.userId.toString();
+
+    let updatedComment;
+    let uniqueRecipients = [];
+    let userName;
+
+    // =====================================================
+    // STEP 1: Validate message
+    // =====================================================
+
+    if (!message || !message.trim()) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Message is required", false));
+    }
+
+    // =====================================================
+    // STEP 2: Validate Task ID
+    // =====================================================
+
+    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task id", false));
+    }
+
+    // =====================================================
+    // STEP 3: Validate Comment ID
+    // =====================================================
+
+    if (!mongoose.Types.ObjectId.isValid(commentId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid comment id", false));
+    }
+
+    // =====================================================
+    // TRANSACTION
+    // =====================================================
+
+    await session.withTransaction(async () => {
+      // ===================================================
+      // STEP 4: Find current user
+      // ===================================================
+
+      const user = await User.findById(userId).select("name").session(session);
+
+      if (!user) {
+        const error = new Error("User not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      userName = user.name;
+
+      // ===================================================
+      // STEP 5: Find task
+      // ===================================================
+
+      const task = await SingleTodo.findOne({
+        _id: taskId,
+        isDeleted: false,
+        isArchived: false,
+      }).session(session);
+
+      if (!task) {
+        const error = new Error("Task not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // ===================================================
+      // STEP 6: Check owner
+      // ===================================================
+
+      const isOwner = task.createdBy.toString() === userId;
+
+      // ===================================================
+      // STEP 7: Check participant
+      // ===================================================
+
+      const isParticipant = task.participants?.some(
+        (participant) => participant.user.toString() === userId
+      );
+
+      // Owner OR participant can access task
+      if (!isOwner && !isParticipant) {
+        const error = new Error("Access denied");
+        error.statusCode = 403;
+        throw error;
+      }
+
+      // ===================================================
+      // STEP 8: Find comment
+      // ===================================================
+
+      const comment = task.comments.id(commentId);
+
+      if (!comment) {
+        const error = new Error("Comment not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // ===================================================
+      // STEP 9: Check comment ownership
+      // ===================================================
+
+      const isCommentOwner = comment.user.toString() === userId;
+
+      if (!isCommentOwner) {
+        const error = new Error("You can only update your own comment");
+
+        error.statusCode = 403;
+        throw error;
+      }
+
+      // ===================================================
+      // STEP 10: Update comment
+      // ===================================================
+
+      comment.message = message.trim();
+      comment.updatedAt = new Date();
+
+      await task.save({ session });
+
+      // Convert subdocument into plain object
+      // so it can safely be emitted through Socket.io
+      updatedComment = comment.toObject();
+
+      // ===================================================
+      // STEP 11: Build all recipients
+      // =====================================================
+
+      const recipients = [
+        // Task owner
+        task.createdBy.toString(),
+
+        // Task participants
+        ...(task.participants || []).map((participant) =>
+          participant.user.toString()
+        ),
+      ];
+
+      // =====================================================
+      // STEP 12: Exclude users
+      // =====================================================
+
+      const excludedUsers = new Set([
+        // User who made the request
+        userId,
+
+        // User who owns the comment
+        comment.user.toString(),
+      ]);
+
+      // =====================================================
+      // STEP 13: Remove duplicates + excluded users
+      // =====================================================
+
+      uniqueRecipients = [...new Set(recipients)].filter(
+        (recipientId) => !excludedUsers.has(recipientId)
+      );
+
+      // =====================================================
+      // STEP 14: Create notifications
+      // =====================================================
+
+      if (uniqueRecipients.length > 0) {
+        const notifications = uniqueRecipients.map((recipientId) => ({
+          user: recipientId,
+          sender: userId,
+          todo: task._id,
+
+          type: "COMMENT_UPDATED",
+
+          title: "Comment updated",
+
+          message: `${user.name} updated a comment on the task.`,
+        }));
+
+        await Notification.insertMany(notifications, { session });
+      }
+
+      // =====================================================
+      // STEP 15: Create activities
+      // =====================================================
+
+      if (uniqueRecipients.length > 0) {
+        const activities = uniqueRecipients.map((recipientId) => ({
+          todo: task._id,
+
+          actor: userId,
+
+          targetUser: recipientId,
+
+          type: "TASK_COMMENT_UPDATED",
+
+          message: `${user.name} updated a comment on the task.`,
+        }));
+
+        await TaskActivity.insertMany(activities, { session });
+      }
+    });
+
+    // =====================================================
+    // STEP 16: Get Socket.io instance
+    // =====================================================
+
+    const io = req.app.get("io");
+
+    // =====================================================
+    // STEP 17: Emit real-time events
+    // =====================================================
+
+    if (io && uniqueRecipients.length > 0) {
+      uniqueRecipients.forEach((recipientId) => {
+        // =================================================
+        // Notification event
+        // =================================================
+
+        io.to(`user:${recipientId}`).emit("notification:new", {
+          type: "COMMENT_UPDATED",
+
+          title: "Comment updated",
+
+          message: `${userName} updated a comment on the task.`,
+
+          sender: {
+            _id: userId,
+            name: userName,
+          },
+
+          todo: taskId,
+
+          comment: updatedComment,
+
+          createdAt: new Date(),
+        });
+
+        // =================================================
+        // Activity event
+        // =================================================
+
+        io.to(`user:${recipientId}`).emit("activity:new", {
+          type: "TASK_COMMENT_UPDATED",
+
+          message: `${userName} updated a comment on the task.`,
+
+          actor: {
+            _id: userId,
+            name: userName,
+          },
+
+          targetUser: recipientId,
+
+          todo: taskId,
+
+          comment: updatedComment,
+
+          createdAt: new Date(),
+        });
+      });
+    }
+
+    // =====================================================
+    // STEP 18: Success response
+    // =====================================================
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          updatedComment,
+          "Comment updated successfully",
+          true
+        )
+      );
+  } catch (error) {
+    console.error("Update Comment Task Error:", error);
+
+    return res
+      .status(error.statusCode || 500)
+      .json(
+        new ApiResponse(
+          error.statusCode || 500,
+          null,
+          error.message || "Internal server error",
+          false
+        )
+      );
+  } finally {
+    await session.endSession();
+  }
+};

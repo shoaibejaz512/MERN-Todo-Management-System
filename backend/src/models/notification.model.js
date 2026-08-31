@@ -24,6 +24,7 @@ const notificationSchema = new mongoose.Schema(
         "TASK_UPDATED",
         "TASK_CREATED",
         "TASK_INVITE",
+        "COMMENT_UPDATED",
         "TASK_ACCEPTED",
         "TASK_REJECTED",
         "TASK_REMOVED",
