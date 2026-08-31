@@ -4226,14 +4226,10 @@ export const cloneSingleTask = async (req, res) => {
       // STEP 4: Get actor and target user names
       const [actor, targetUser] = await Promise.all([
         // Actor = user cloning the task
-        User.findById(userId)
-          .select("name")
-          .session(session),
+        User.findById(userId).select("name").session(session),
 
         // Target = original task owner
-        User.findById(task.createdBy)
-          .select("name")
-          .session(session),
+        User.findById(task.createdBy).select("name").session(session),
       ]);
 
       if (!actor) {
@@ -4469,9 +4465,7 @@ export const commentTask = async (req, res) => {
       );
 
       if (!isOwner && !isParticipant) {
-        const error = new Error(
-          "You are not allowed to comment on this task"
-        );
+        const error = new Error("You are not allowed to comment on this task");
 
         error.statusCode = 403;
         throw error;
@@ -4520,9 +4514,9 @@ export const commentTask = async (req, res) => {
         ];
 
         // Remove duplicates + remove commenter
-        uniqueRecipients = [
-          ...new Set(recipients),
-        ].filter((recipientId) => recipientId !== userId);
+        uniqueRecipients = [...new Set(recipients)].filter(
+          (recipientId) => recipientId !== userId
+        );
       }
 
       // =======================================================
@@ -4592,14 +4586,7 @@ export const commentTask = async (req, res) => {
 
     return res
       .status(201)
-      .json(
-        new ApiResponse(
-          201,
-          comment,
-          "Comment added successfully",
-          true
-        )
-      );
+      .json(new ApiResponse(201, comment, "Comment added successfully", true));
   } catch (error) {
     console.error("commentTask error:", error);
 
@@ -4611,9 +4598,7 @@ export const commentTask = async (req, res) => {
         new ApiResponse(
           statusCode,
           null,
-          error.statusCode
-            ? error.message
-            : "Internal Server Error",
+          error.statusCode ? error.message : "Internal Server Error",
           false
         )
       );
@@ -4621,4 +4606,81 @@ export const commentTask = async (req, res) => {
     await session.endSession();
   }
 };
+export const getCommentTasks = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const page = Math.max(parseInt(req.query.page) || 1, 1);
+    const limit = Math.min(parseInt(req.query.limit) || 10, 50);
+    const skip = (page - 1) * limit;
 
+    // STEP 1: Validate Task ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task id", false));
+    }
+
+    const task = await SingleTodo.findOne({
+      _id: id,
+      isDeleted: false,
+      isArchived: fase,
+      $or: [
+        { createdBy: req.user.userID },
+        {
+          participants: {
+            $elemMatch: {
+              user: req.user.userId,
+            },
+          },
+        },
+      ],
+    }).populate({
+      path: "comments",
+      option: {
+        sort: { createdAt: -1 },
+        skip,
+        limit,
+      },
+      populate: {
+        path: "user",
+        select: "name email profileImage",
+      },
+    });
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    // STEP 3: Pagination Metadata
+    const totalComments = task.comments.length;
+    // Better count using the stored ObjectId array
+    const total = await Todo.findById(id).select("comments");
+
+    // STEP 4: Success Response
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          comments: task.comments,
+          pagination: {
+            page,
+            limit,
+            totalComments: totalCount,
+            totalPages,
+            hasNextPage: page < totalPages,
+            hasPreviousPage: page > 1,
+          },
+        },
+        "Comments fetched successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error(error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, error.message, false));
+  }
+};
