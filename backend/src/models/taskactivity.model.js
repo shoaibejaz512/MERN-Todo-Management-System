@@ -46,6 +46,7 @@ const taskActivitySchema = new mongoose.Schema(
         "DEADLINE_UPDATED",
 
         "COMMENT_ADDED",
+        "COMMENT_DELETED",
         "ATTACHMENT_ADDED",
 
         "TASK_COMPLETED",

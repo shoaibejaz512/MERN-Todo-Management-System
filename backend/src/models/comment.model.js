@@ -17,6 +17,10 @@ const commentSchema = new mongoose.Schema(
       trim: true,
       minlength: 5,
     },
+    isDeleted:{
+      type:Boolean,
+      default:false
+    }
   },
   {
     timestamps: true,

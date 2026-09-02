@@ -4901,13 +4901,11 @@ export const updateCommentTask = async (req, res) => {
     // STEP 16: Get Socket.io instance
     // =====================================================
 
-    const io = req.app.get("io");
-
     // =====================================================
     // STEP 17: Emit real-time events
     // =====================================================
 
-    if (io && uniqueRecipients.length > 0) {
+    if (uniqueRecipients.length > 0) {
       uniqueRecipients.forEach((recipientId) => {
         // =================================================
         // Notification event
@@ -4985,6 +4983,327 @@ export const updateCommentTask = async (req, res) => {
         )
       );
   } finally {
+    await session.endSession();
+  }
+};
+export const deleteCommentTask = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  let uniqueRecipients = [];
+  let deletedComment = null;
+  let userName = null;
+
+  try {
+    const { taskId, commentId } = req.params;
+    const userId = req.user.userId.toString();
+
+    // =====================================================
+    // STEP 1: Validate IDs
+    // =====================================================
+
+    if (
+      !mongoose.Types.ObjectId.isValid(taskId) ||
+      !mongoose.Types.ObjectId.isValid(commentId)
+    ) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Invalid task or comment ID",
+            false
+          )
+        );
+    }
+
+    // =====================================================
+    // STEP 2: Transaction
+    // =====================================================
+
+    await session.withTransaction(async () => {
+      // =====================================================
+      // STEP 3: Find authenticated user
+      // =====================================================
+
+      const user = await User.findById(userId)
+        .select("name email profileImage")
+        .session(session);
+
+      if (!user) {
+        const error = new Error("User not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      userName = user.name;
+
+      // =====================================================
+      // STEP 4: Find task
+      // =====================================================
+
+      const task = await SingleTodo.findOne({
+        _id: taskId,
+        isDeleted: false,
+        isArchived: false,
+      }).session(session);
+
+      if (!task) {
+        const error = new Error("Task not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // =====================================================
+      // STEP 5: Check authorization
+      // =====================================================
+
+      const isOwner =
+        task.createdBy.toString() === userId;
+
+      const isParticipant = task.participants?.some(
+        (participant) =>
+          participant.user.toString() === userId
+      );
+
+      if (!isOwner && !isParticipant) {
+        const error = new Error("Access denied");
+        error.statusCode = 403;
+        throw error;
+      }
+
+      // =====================================================
+      // STEP 6: Find comment
+      // =====================================================
+
+      const comment = await Comment.findOne({
+        _id: commentId,
+        todo: taskId,
+        createdBy: userId,
+        isDeleted: false,
+      }).session(session);
+
+      if (!comment) {
+        const error = new Error(
+          "Comment not found or you are not allowed to delete it"
+        );
+
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // =====================================================
+      // STEP 7: Soft delete comment
+      // =====================================================
+
+      comment.isDeleted = true;
+
+      // If your Comment schema has deletedAt,
+      // you can also use:
+      //
+      // comment.deletedAt = new Date();
+
+      await comment.save({ session });
+
+      // =====================================================
+      // STEP 8: Remove comment ID from task.comments
+      // =====================================================
+
+      const updatedTask = await SingleTodo.findOneAndUpdate(
+        {
+          _id: taskId,
+          isDeleted: false,
+          isArchived: false,
+        },
+        {
+          $pull: {
+            comments: comment._id,
+          },
+        },
+        {
+          new: true,
+          session,
+        }
+      );
+
+      if (!updatedTask) {
+        const error = new Error(
+          "Failed to update task comments"
+        );
+
+        error.statusCode = 500;
+        throw error;
+      }
+
+      // =====================================================
+      // STEP 9: Prepare deleted comment response
+      // =====================================================
+
+      deletedComment = {
+        _id: comment._id,
+        todo: comment.todo,
+        createdBy: comment.createdBy,
+        isDeleted: true,
+      };
+
+      // =====================================================
+      // STEP 10: Get unique notification recipients
+      // =====================================================
+
+      uniqueRecipients = [
+        ...new Set(
+          [
+            // Task owner
+            task.createdBy.toString(),
+
+            // Task participants
+            ...(task.participants || []).map(
+              (participant) =>
+                participant.user.toString()
+            ),
+          ].filter(
+            (recipientId) =>
+              recipientId !== userId
+          )
+        ),
+      ];
+
+      // =====================================================
+      // STEP 11: Create Notifications
+      // =====================================================
+
+      if (uniqueRecipients.length > 0) {
+        const notifications =
+          uniqueRecipients.map((recipientId) => ({
+            user: recipientId,
+            sender: userId,
+            type: "COMMENT_DELETED",
+            title: "Comment Deleted",
+            message: `${userName} deleted a comment from task "${task.title}"`,
+            todo: taskId,
+          }));
+
+        await Notification.insertMany(
+          notifications,
+          {
+            session,
+          }
+        );
+      }
+
+      // =====================================================
+      // STEP 12: Create Task Activities
+      // =====================================================
+
+      if (uniqueRecipients.length > 0) {
+        const activities =
+          uniqueRecipients.map((recipientId) => ({
+            todo: taskId,
+            actor: userId,
+            targetUser: recipientId,
+            type: "COMMENT_DELETED",
+            message: `${userName} deleted a comment from task "${task.title}"`,
+          }));
+
+        await TaskActivity.insertMany(
+          activities,
+          {
+            session,
+          }
+        );
+      }
+    });
+
+    // =====================================================
+    // STEP 13: Emit Socket.IO events
+    // =====================================================
+
+    if (uniqueRecipients.length > 0) {
+      uniqueRecipients.forEach((recipientId) => {
+        // =================================================
+        // Notification event
+        // =================================================
+
+        io.to(`user:${recipientId}`).emit(
+          "notification:new",
+          {
+            type: "COMMENT_DELETED",
+            title: "Comment Deleted",
+            message: `${userName} deleted a comment from the task.`,
+            sender: {
+              _id: userId,
+              name: userName,
+            },
+            todo: taskId,
+            comment: deletedComment,
+            createdAt: new Date(),
+          }
+        );
+
+        // =================================================
+        // Activity event
+        // =================================================
+
+        io.to(`user:${recipientId}`).emit(
+          "activity:new",
+          {
+            type: "COMMENT_DELETED",
+            message: `${userName} deleted a comment from the task.`,
+            actor: {
+              _id: userId,
+              name: userName,
+            },
+            targetUser: recipientId,
+            todo: taskId,
+            comment: deletedComment,
+            createdAt: new Date(),
+          }
+        );
+      });
+    }
+
+    // =====================================================
+    // STEP 14: Success response
+    // =====================================================
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          {
+            comment: deletedComment,
+          },
+          "Comment deleted successfully",
+          true
+        )
+      );
+  } catch (error) {
+    // =====================================================
+    // ERROR HANDLING
+    // =====================================================
+
+    console.error(
+      "Delete comment error:",
+      error
+    );
+
+    return res
+      .status(error.statusCode || 500)
+      .json(
+        new ApiResponse(
+          error.statusCode || 500,
+          null,
+          error.message ||
+            "Failed to delete comment",
+          false
+        )
+      );
+  } finally {
+    // =====================================================
+    // STEP 15: Close MongoDB session
+    // =====================================================
+
     await session.endSession();
   }
 };
