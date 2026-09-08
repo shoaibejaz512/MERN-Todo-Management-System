@@ -386,7 +386,205 @@ export const updateSubTask = async (req, res) => {
     await session.endSession();
   }
 };
-const updateSubTaskStatus = async (req, res) => {};
+const updateSubTaskStatus = async (req, res) => {
+  const session = await mongoose.startTransaction();
+  try {
+    const { id, subTaskId } = req.params;
+    const { status } = req.body;
+    const userId = req.user.userId.toString();
+
+    // =====================================================
+    // STEP 1: VALIDATE IDS
+    // =====================================================
+
+    if (
+      !mongoose.Types.ObjectId.isValid(id) ||
+      !mongoose.Types.ObjectId.isValid(subTaskId)
+    ) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task or sub-task ID", false));
+    }
+
+    let updatedSubTask = null;
+    let parentTask = null;
+
+    let createdActivities = [];
+    let createdNotifications = [];
+
+    let recipientIds = [];
+    let activity;
+
+    await session.withTransaction(async () => {
+      parentTask = await Todo.findOne({
+        _id: id,
+        createdBy: userId,
+        isDeleted: false,
+        isArchived: false,
+        SubTodos: subTaskId,
+      }).session(session);
+
+      if (!parentTask) {
+        const error = new Error(
+          "Task not found or you are not authorized to update it."
+        );
+
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // ===================================================
+      // STEP 2.2: FIND SUB-TASK
+      // ===================================================
+
+      const subTask = await SubTodo.findOne({
+        _id: subTaskId,
+        createdBy: userId,
+        isDeleted: false,
+        isArchived: false,
+      }).session(session);
+
+      if (!subTask) {
+        const error = new Error(
+          "Sub-task not found or you are not authorized to update it."
+        );
+
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // ---------------------------------------------------
+      // STATUS
+      // ---------------------------------------------------
+
+      if (status !== undefined && status !== subTask.status) {
+        activity = await TaskActivity.create({
+          todo: parentTask._id,
+          actor: userId,
+          type: "STATUS_UPDATED",
+          message: `Sub-task status changed from "${subTask.status}" to "${status}".`,
+          metadata: {
+            subTaskId: subTask._id,
+            field: "status",
+            oldValue: subTask.status,
+            newValue: status,
+          },
+        });
+        subTask.status = status;
+      }
+
+      if (!activity) {
+        const error = new Error("No changes were made to the sub-task.");
+
+        error.statusCode = 400;
+        throw error;
+      }
+
+      // ===================================================
+      // STEP 5: SAVE SUB-TASK
+      // ===================================================
+
+      updatedSubTask = await subTask.save({
+        session,
+      });
+
+      // ===================================================
+      // STEP 7: FIND NOTIFICATION RECIPIENTS
+      // ===================================================
+
+      recipientIds = [
+        ...new Set(
+          (parentTask.participants || [])
+            .map((participant) => participant.user?.toString())
+            .filter(
+              (participantId) => participantId && participantId !== userId
+            )
+        ),
+      ];
+
+      // ===================================================
+      // STEP 8: CREATE NOTIFICATIONS FROM ACTIVITIES
+      // ===================================================
+
+      if (recipientIds.length > 0) {
+        const notifications = [];
+
+        for (const recipientId of recipientIds) {
+          for (const activity of createdActivities) {
+            notifications.push({
+              user: recipientId,
+              sender: userId,
+
+              type: activity.type,
+
+              title: "Sub-task status Updated",
+
+              message: activity.message,
+
+              todo: parentTask._id,
+
+              // Connect notification with activity
+              activity: activity._id,
+
+              metadata: activity.metadata,
+
+              isRead: false,
+            });
+          }
+        }
+
+        createdNotifications = await Notification.insertMany(notifications, {
+          session,
+        });
+      }
+    });
+
+    // =====================================================
+    // STEP 9: REAL-TIME NOTIFICATIONS
+    // =====================================================
+
+    if (recipientIds.length > 0) {
+      recipientIds.forEach((recipientId) => {
+        const userNotifications = createdNotifications.filter(
+          (notification) => notification.user.toString() === recipientId
+        );
+
+        io.to(`user:${recipientId}`).emit("notification", {
+          notifications: userNotifications,
+        });
+      });
+    }
+
+    // ==========================================
+    // STEP 7: Emit Activities to Task Room
+    // ==========================================
+
+    for (const activity of createdActivities) {
+      io.to(`task:${parentTask._id}`).emit("task:activity", activity);
+    }
+
+    // =====================================================
+    // STEP 10: RESPONSE
+    // =====================================================
+
+    return res.status(200).json(new ApiResponse(200,updateSubTask,"Status has been Changed",true))
+  } catch (error) {
+     console.error("Update sub-task error:", error);
+
+     return res
+       .status(error.statusCode || 500)
+       .json(
+         new ApiResponse(
+           error.statusCode || 500,
+           null,
+           error.message || "Failed to update sub-task status",
+           false
+         )
+       );
+  } finally {
+    await session.endSession()
+  }
+};
 const deleteSubTask = async (req, res) => {};
 
 export { updateSubTask, updateSubTaskStatus, deleteSubTask };
