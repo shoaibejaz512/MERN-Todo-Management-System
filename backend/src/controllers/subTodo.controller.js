@@ -4,6 +4,7 @@ import ApiResponse from "../utils/apiResponseHandler.js";
 import { TaskActivity } from "../models/taskactivity.model.js";
 import { Notification } from "../models/notification.model.js";
 import { io } from "../../server.js";
+import { Todo } from "../models/todo.model.js";
 
 export const updateSubTask = async (req, res) => {
   const session = await mongoose.startSession();
@@ -567,24 +568,254 @@ const updateSubTaskStatus = async (req, res) => {
     // STEP 10: RESPONSE
     // =====================================================
 
-    return res.status(200).json(new ApiResponse(200,updateSubTask,"Status has been Changed",true))
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(200, updateSubTask, "Status has been Changed", true)
+      );
   } catch (error) {
-     console.error("Update sub-task error:", error);
+    console.error("Update sub-task error:", error);
 
-     return res
-       .status(error.statusCode || 500)
-       .json(
-         new ApiResponse(
-           error.statusCode || 500,
-           null,
-           error.message || "Failed to update sub-task status",
-           false
-         )
-       );
+    return res
+      .status(error.statusCode || 500)
+      .json(
+        new ApiResponse(
+          error.statusCode || 500,
+          null,
+          error.message || "Failed to update sub-task status",
+          false
+        )
+      );
   } finally {
-    await session.endSession()
+    await session.endSession();
   }
 };
-const deleteSubTask = async (req, res) => {};
+const deleteSubTask = async (req, res) => {
+  const session = await mongoose.startSession();
 
+  try {
+    const { taskId, subTaskId } = req.params;
+    const userId = req.user.userId.toString();
+
+    // ===================================================
+    // STEP 1: VALIDATE IDS
+    // ===================================================
+
+    if (
+      !mongoose.Types.ObjectId.isValid(taskId) ||
+      !mongoose.Types.ObjectId.isValid(subTaskId)
+    ) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task or sub-task ID", false));
+    }
+
+    let updatedTask;
+    let activity;
+    let createdNotifications = [];
+    let recipientIds = [];
+
+    await session.withTransaction(async () => {
+      // ===================================================
+      // STEP 2: FIND PARENT TASK
+      // ===================================================
+
+      const parentTask = await Todo.findOne({
+        _id: taskId,
+        isDeleted: false,
+        isArchived: false,
+        createdBy: userId,
+        SubTodos: subTaskId,
+      }).session(session);
+
+      if (!parentTask) {
+        const error = new Error(
+          "Task not found or you are not authorized to delete this sub-task."
+        );
+
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // ===================================================
+      // STEP 3: FIND SUB-TASK
+      // ===================================================
+
+      const subTask = await SubTodo.findOne({
+        _id: subTaskId,
+        createdBy: userId,
+        isDeleted: false,
+        isArchived: false,
+      }).session(session);
+
+      if (!subTask) {
+        const error = new Error(
+          "Sub-task not found or you are not authorized to delete it."
+        );
+
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // ===================================================
+      // STEP 4: GET ACTOR / USER NAME
+      // ===================================================
+
+      const actor = await User.findById(userId).select("name").session(session);
+
+      if (!actor) {
+        const error = new Error("User not found.");
+
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // ===================================================
+      // STEP 5: REMOVE SUB-TASK ID FROM PARENT TASK
+      // ===================================================
+
+      updatedTask = await Todo.findOneAndUpdate(
+        {
+          _id: taskId,
+          isDeleted: false,
+          isArchived: false,
+          createdBy: userId,
+          SubTodos: subTaskId,
+        },
+        {
+          $pull: {
+            SubTodos: subTaskId,
+          },
+        },
+        {
+          new: true,
+          session,
+        }
+      );
+
+      if (!updatedTask) {
+        const error = new Error("Sub-task could not be removed.");
+
+        error.statusCode = 400;
+        throw error;
+      }
+
+      // ===================================================
+      // STEP 6: SOFT DELETE SUB-TASK
+      // ===================================================
+
+      subTask.isDeleted = true;
+
+      await subTask.save({ session });
+
+      // ===================================================
+      // STEP 7: GET COLLABORATORS
+      // ===================================================
+
+      recipientIds = [
+        ...new Set(
+          (parentTask.participants || [])
+            .map((participant) => participant.user?.toString())
+            .filter(
+              (participantId) => participantId && participantId !== userId
+            )
+        ),
+      ];
+
+      // ===================================================
+      // STEP 8: CREATE ACTIVITY
+      // ===================================================
+
+      activity = await TaskActivity.create(
+        [
+          {
+            todo: taskId,
+            actor: userId,
+            type: "TASK_UPDATED",
+            message: `${actor.name} deleted sub-task "${subTask.title}"`,
+            metadata: {
+              extra: {
+                subTaskId: subTask._id,
+                subTaskTitle: subTask.title,
+                action: "SUBTASK_DELETED",
+              },
+            },
+          },
+        ],
+        { session }
+      );
+
+      activity = activity[0];
+
+      // ===================================================
+      // STEP 9: CREATE NOTIFICATIONS
+      // ===================================================
+
+      if (recipientIds.length > 0) {
+        const notifications = recipientIds.map((recipientId) => ({
+          user: recipientId,
+          sender: userId,
+          type: "TASK_UPDATED",
+          title: "Sub-task Deleted",
+          message: `${actor.name} deleted sub-task "${subTask.title}"`,
+          todo: parentTask._id,
+          activity: activity._id,
+          metadata: activity.metadata,
+          isRead: false,
+        }));
+
+        createdNotifications = await Notification.insertMany(notifications, {
+          session,
+        });
+      }
+    });
+
+    // ===================================================
+    // STEP 10: REAL-TIME NOTIFICATIONS
+    // ===================================================
+
+    if (recipientIds.length > 0) {
+      recipientIds.forEach((recipientId) => {
+        const userNotifications = createdNotifications.filter(
+          (notification) => notification.user.toString() === recipientId
+        );
+
+        io.to(`user:${recipientId}`).emit("notification", {
+          notifications: userNotifications,
+        });
+      });
+    }
+
+    // ===================================================
+    // STEP 11: REAL-TIME ACTIVITY
+    // ===================================================
+
+    io.to(`task:${taskId}`).emit("task:activity", activity);
+
+    // ===================================================
+    // STEP 12: RESPONSE
+    // ===================================================
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(200, updatedTask, "Sub-task deleted successfully", true)
+      );
+  } catch (error) {
+    console.error("Delete SubTask Error:", error);
+
+    return res
+      .status(error.statusCode || 500)
+      .json(
+        new ApiResponse(
+          error.statusCode || 500,
+          null,
+          error.message || "Something went wrong",
+          false
+        )
+      );
+  } finally {
+    await session.endSession();
+  }
+};
 export { updateSubTask, updateSubTaskStatus, deleteSubTask };
