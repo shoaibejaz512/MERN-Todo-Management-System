@@ -17,7 +17,10 @@ const taskActivitySchema = new mongoose.Schema(
       required: true,
       index: true,
     },
-
+    acotorName:{
+      type: String,
+      required: true,
+    },
     // Optional target user (e.g. member added, removed, role changed)
     targetUser: {
       type: mongoose.Schema.Types.ObjectId,

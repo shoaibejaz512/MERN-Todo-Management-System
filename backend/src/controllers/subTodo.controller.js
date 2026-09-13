@@ -92,8 +92,23 @@ export const updateSubTask = async (req, res) => {
       }
 
       // ===================================================
-      // STEP 3: TRACK ACTIVITIES
+      // STEP 2.3: FIND USER WHO UPDATED THE SUB-TASK
       // ===================================================
+
+      const actorUser = await User.findById(userId)
+        .select("name")
+        .session(session);
+
+      if (!actorUser) {
+        const error = new Error("User not found.");
+
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // ===================================================
+      // STEP 3: TRACK ACTIVITIES
+      // =====================================================
 
       const activities = [];
 
@@ -104,9 +119,17 @@ export const updateSubTask = async (req, res) => {
       if (title !== undefined && title !== subTask.title) {
         activities.push({
           todo: parentTask._id,
+
+          // User who performed the action
           actor: userId,
+
+          // Snapshot of user's name
+          actorName: actorUser.name,
+
           type: "TITLE_UPDATED",
-          message: `Sub-task title was changed from "${subTask.title}" to "${title}".`,
+
+          message: `${actorUser.name} changed the sub-task title from "${subTask.title}" to "${title}".`,
+
           metadata: {
             subTaskId: subTask._id,
             field: "title",
@@ -125,9 +148,14 @@ export const updateSubTask = async (req, res) => {
       if (description !== undefined && description !== subTask.description) {
         activities.push({
           todo: parentTask._id,
+
           actor: userId,
+          actorName: actorUser.name,
+
           type: "DESCRIPTION_UPDATED",
-          message: "Sub-task description was updated.",
+
+          message: `${actorUser.name} updated the sub-task description.`,
+
           metadata: {
             subTaskId: subTask._id,
             field: "description",
@@ -146,9 +174,14 @@ export const updateSubTask = async (req, res) => {
       if (priority !== undefined && priority !== subTask.priority) {
         activities.push({
           todo: parentTask._id,
+
           actor: userId,
+          actorName: actorUser.name,
+
           type: "PRIORITY_UPDATED",
-          message: `Sub-task priority changed from "${subTask.priority}" to "${priority}".`,
+
+          message: `${actorUser.name} changed the sub-task priority from "${subTask.priority}" to "${priority}".`,
+
           metadata: {
             subTaskId: subTask._id,
             field: "priority",
@@ -170,9 +203,14 @@ export const updateSubTask = async (req, res) => {
       ) {
         activities.push({
           todo: parentTask._id,
+
           actor: userId,
+          actorName: actorUser.name,
+
           type: "ESTIMATED_HOURS_UPDATED",
-          message: `Estimated hours changed from "${subTask.estimatedHours}" to "${estimatedHours}".`,
+
+          message: `${actorUser.name} changed estimated hours from "${subTask.estimatedHours}" to "${estimatedHours}".`,
+
           metadata: {
             subTaskId: subTask._id,
             field: "estimatedHours",
@@ -194,9 +232,14 @@ export const updateSubTask = async (req, res) => {
       ) {
         activities.push({
           todo: parentTask._id,
+
           actor: userId,
+          actorName: actorUser.name,
+
           type: "DEADLINE_UPDATED",
-          message: "Sub-task deadline was updated.",
+
+          message: `${actorUser.name} updated the sub-task deadline.`,
+
           metadata: {
             subTaskId: subTask._id,
             field: "deadline",
@@ -218,9 +261,14 @@ export const updateSubTask = async (req, res) => {
       ) {
         activities.push({
           todo: parentTask._id,
+
           actor: userId,
+          actorName: actorUser.name,
+
           type: "TAGS_UPDATED",
-          message: "Sub-task tags were updated.",
+
+          message: `${actorUser.name} updated the sub-task tags.`,
+
           metadata: {
             subTaskId: subTask._id,
             field: "tags",
@@ -239,9 +287,14 @@ export const updateSubTask = async (req, res) => {
       if (status !== undefined && status !== subTask.status) {
         activities.push({
           todo: parentTask._id,
+
           actor: userId,
+          actorName: actorUser.name,
+
           type: "STATUS_UPDATED",
-          message: `Sub-task status changed from "${subTask.status}" to "${status}".`,
+
+          message: `${actorUser.name} changed the sub-task status from "${subTask.status}" to "${status}".`,
+
           metadata: {
             subTaskId: subTask._id,
             field: "status",
@@ -295,7 +348,7 @@ export const updateSubTask = async (req, res) => {
       ];
 
       // ===================================================
-      // STEP 8: CREATE NOTIFICATIONS FROM ACTIVITIES
+      // STEP 8: CREATE NOTIFICATIONS
       // ===================================================
 
       if (recipientIds.length > 0) {
@@ -305,6 +358,8 @@ export const updateSubTask = async (req, res) => {
           for (const activity of createdActivities) {
             notifications.push({
               user: recipientId,
+
+              // Person who performed the action
               sender: userId,
 
               type: activity.type,
@@ -318,7 +373,13 @@ export const updateSubTask = async (req, res) => {
               // Connect notification with activity
               activity: activity._id,
 
-              metadata: activity.metadata,
+              metadata: {
+                ...activity.metadata,
+
+                // Also keep actor information
+                actor: userId,
+                actorName: actorUser.name,
+              },
 
               isRead: false,
             });
@@ -347,16 +408,16 @@ export const updateSubTask = async (req, res) => {
       });
     }
 
-    // ==========================================
-    // STEP 7: Emit Activities to Task Room
-    // ==========================================
+    // =====================================================
+    // STEP 10: EMIT ACTIVITIES TO TASK ROOM
+    // =====================================================
 
     for (const activity of createdActivities) {
       io.to(`task:${parentTask._id}`).emit("task:activity", activity);
     }
 
     // =====================================================
-    // STEP 10: RESPONSE
+    // STEP 11: RESPONSE
     // =====================================================
 
     return res.status(200).json(
@@ -387,11 +448,18 @@ export const updateSubTask = async (req, res) => {
     await session.endSession();
   }
 };
-const updateSubTaskStatus = async (req, res) => {
-  const session = await mongoose.startTransaction();
+
+export const updateSubTaskStatus = async (req, res) => {
+  // =====================================================
+  // START SESSION
+  // =====================================================
+
+  const session = await mongoose.startSession();
+
   try {
     const { id, subTaskId } = req.params;
     const { status } = req.body;
+
     const userId = req.user.userId.toString();
 
     // =====================================================
@@ -407,6 +475,10 @@ const updateSubTaskStatus = async (req, res) => {
         .json(new ApiResponse(400, null, "Invalid task or sub-task ID", false));
     }
 
+    // =====================================================
+    // VARIABLES
+    // =====================================================
+
     let updatedSubTask = null;
     let parentTask = null;
 
@@ -414,9 +486,16 @@ const updateSubTaskStatus = async (req, res) => {
     let createdNotifications = [];
 
     let recipientIds = [];
-    let activity;
+
+    // =====================================================
+    // STEP 2: TRANSACTION
+    // =====================================================
 
     await session.withTransaction(async () => {
+      // ===================================================
+      // STEP 2.1: FIND PARENT TASK
+      // ===================================================
+
       parentTask = await Todo.findOne({
         _id: id,
         createdBy: userId,
@@ -454,27 +533,37 @@ const updateSubTaskStatus = async (req, res) => {
         throw error;
       }
 
-      // ---------------------------------------------------
-      // STATUS
-      // ---------------------------------------------------
+      // ===================================================
+      // STEP 2.3: FIND ACTOR / USER
+      // ===================================================
 
-      if (status !== undefined && status !== subTask.status) {
-        activity = await TaskActivity.create({
-          todo: parentTask._id,
-          actor: userId,
-          type: "STATUS_UPDATED",
-          message: `Sub-task status changed from "${subTask.status}" to "${status}".`,
-          metadata: {
-            subTaskId: subTask._id,
-            field: "status",
-            oldValue: subTask.status,
-            newValue: status,
-          },
-        });
-        subTask.status = status;
+      const actorUser = await User.findById(userId)
+        .select("name")
+        .session(session);
+
+      if (!actorUser) {
+        const error = new Error("User not found.");
+
+        error.statusCode = 404;
+        throw error;
       }
 
-      if (!activity) {
+      // ===================================================
+      // STEP 3: VALIDATE STATUS
+      // =====================================================
+
+      if (status === undefined) {
+        const error = new Error("Status is required.");
+
+        error.statusCode = 400;
+        throw error;
+      }
+
+      // ===================================================
+      // STEP 4: CHECK STATUS CHANGE
+      // ===================================================
+
+      if (status === subTask.status) {
         const error = new Error("No changes were made to the sub-task.");
 
         error.statusCode = 400;
@@ -482,8 +571,42 @@ const updateSubTaskStatus = async (req, res) => {
       }
 
       // ===================================================
-      // STEP 5: SAVE SUB-TASK
+      // STEP 5: CREATE ACTIVITY
       // ===================================================
+
+      const activity = new TaskActivity({
+        todo: parentTask._id,
+
+        // User who performed the action
+        actor: userId,
+
+        // Historical snapshot of user's name
+        actorName: actorUser.name,
+
+        type: "STATUS_UPDATED",
+
+        message: `${actorUser.name} changed the sub-task status from "${subTask.status}" to "${status}".`,
+
+        metadata: {
+          subTaskId: subTask._id,
+          field: "status",
+          oldValue: subTask.status,
+          newValue: status,
+        },
+      });
+
+      // IMPORTANT:
+      // Save activity using same transaction session
+      await activity.save({ session });
+
+      // Store activity for response + socket
+      createdActivities.push(activity);
+
+      // ===================================================
+      // STEP 6: UPDATE SUB-TASK STATUS
+      // ===================================================
+
+      subTask.status = status;
 
       updatedSubTask = await subTask.save({
         session,
@@ -504,7 +627,7 @@ const updateSubTaskStatus = async (req, res) => {
       ];
 
       // ===================================================
-      // STEP 8: CREATE NOTIFICATIONS FROM ACTIVITIES
+      // STEP 8: CREATE NOTIFICATIONS
       // ===================================================
 
       if (recipientIds.length > 0) {
@@ -513,21 +636,30 @@ const updateSubTaskStatus = async (req, res) => {
         for (const recipientId of recipientIds) {
           for (const activity of createdActivities) {
             notifications.push({
+              // Person receiving notification
               user: recipientId,
+
+              // Person who performed action
               sender: userId,
 
               type: activity.type,
 
-              title: "Sub-task status Updated",
+              title: "Sub-task Status Updated",
 
               message: activity.message,
 
               todo: parentTask._id,
 
-              // Connect notification with activity
+              // Connect notification to activity
               activity: activity._id,
 
-              metadata: activity.metadata,
+              metadata: {
+                ...activity.metadata,
+
+                // Keep actor information
+                actor: userId,
+                actorName: actorUser.name,
+              },
 
               isRead: false,
             });
@@ -556,25 +688,31 @@ const updateSubTaskStatus = async (req, res) => {
       });
     }
 
-    // ==========================================
-    // STEP 7: Emit Activities to Task Room
-    // ==========================================
+    // =====================================================
+    // STEP 10: EMIT ACTIVITY TO TASK ROOM
+    // =====================================================
 
     for (const activity of createdActivities) {
       io.to(`task:${parentTask._id}`).emit("task:activity", activity);
     }
 
     // =====================================================
-    // STEP 10: RESPONSE
+    // STEP 11: RESPONSE
     // =====================================================
 
-    return res
-      .status(200)
-      .json(
-        new ApiResponse(200, updateSubTask, "Status has been Changed", true)
-      );
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          subTask: updatedSubTask,
+          activities: createdActivities,
+        },
+        "Sub-task status has been changed successfully",
+        true
+      )
+    );
   } catch (error) {
-    console.error("Update sub-task error:", error);
+    console.error("Update sub-task status error:", error);
 
     return res
       .status(error.statusCode || 500)
@@ -587,14 +725,20 @@ const updateSubTaskStatus = async (req, res) => {
         )
       );
   } finally {
+    // =====================================================
+    // END SESSION
+    // =====================================================
+
     await session.endSession();
   }
 };
+
 const deleteSubTask = async (req, res) => {
   const session = await mongoose.startSession();
 
   try {
     const { taskId, subTaskId } = req.params;
+
     const userId = req.user.userId.toString();
 
     // ===================================================
@@ -607,7 +751,14 @@ const deleteSubTask = async (req, res) => {
     ) {
       return res
         .status(400)
-        .json(new ApiResponse(400, null, "Invalid task or sub-task ID", false));
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Invalid task or sub-task ID",
+            false
+          )
+        );
     }
 
     let updatedTask;
@@ -661,7 +812,9 @@ const deleteSubTask = async (req, res) => {
       // STEP 4: GET ACTOR / USER NAME
       // ===================================================
 
-      const actor = await User.findById(userId).select("name").session(session);
+      const actor = await User.findById(userId)
+        .select("name")
+        .session(session);
 
       if (!actor) {
         const error = new Error("User not found.");
@@ -694,7 +847,9 @@ const deleteSubTask = async (req, res) => {
       );
 
       if (!updatedTask) {
-        const error = new Error("Sub-task could not be removed.");
+        const error = new Error(
+          "Sub-task could not be removed."
+        );
 
         error.statusCode = 400;
         throw error;
@@ -706,7 +861,9 @@ const deleteSubTask = async (req, res) => {
 
       subTask.isDeleted = true;
 
-      await subTask.save({ session });
+      await subTask.save({
+        session,
+      });
 
       // ===================================================
       // STEP 7: GET COLLABORATORS
@@ -715,9 +872,13 @@ const deleteSubTask = async (req, res) => {
       recipientIds = [
         ...new Set(
           (parentTask.participants || [])
-            .map((participant) => participant.user?.toString())
+            .map((participant) =>
+              participant.user?.toString()
+            )
             .filter(
-              (participantId) => participantId && participantId !== userId
+              (participantId) =>
+                participantId &&
+                participantId !== userId
             )
         ),
       ];
@@ -726,13 +887,21 @@ const deleteSubTask = async (req, res) => {
       // STEP 8: CREATE ACTIVITY
       // ===================================================
 
-      activity = await TaskActivity.create(
+      const activities = await TaskActivity.create(
         [
           {
             todo: taskId,
+
+            // User who performed the action
             actor: userId,
+
+            // Historical snapshot of user's name
+            actorName: actor.name,
+
             type: "TASK_UPDATED",
+
             message: `${actor.name} deleted sub-task "${subTask.title}"`,
+
             metadata: {
               extra: {
                 subTaskId: subTask._id,
@@ -742,31 +911,51 @@ const deleteSubTask = async (req, res) => {
             },
           },
         ],
-        { session }
+        {
+          session,
+        }
       );
 
-      activity = activity[0];
+      activity = activities[0];
 
       // ===================================================
       // STEP 9: CREATE NOTIFICATIONS
       // ===================================================
 
       if (recipientIds.length > 0) {
-        const notifications = recipientIds.map((recipientId) => ({
-          user: recipientId,
-          sender: userId,
-          type: "TASK_UPDATED",
-          title: "Sub-task Deleted",
-          message: `${actor.name} deleted sub-task "${subTask.title}"`,
-          todo: parentTask._id,
-          activity: activity._id,
-          metadata: activity.metadata,
-          isRead: false,
-        }));
+        const notifications = recipientIds.map(
+          (recipientId) => ({
+            user: recipientId,
 
-        createdNotifications = await Notification.insertMany(notifications, {
-          session,
-        });
+            sender: userId,
+
+            type: "TASK_UPDATED",
+
+            title: "Sub-task Deleted",
+
+            message: `${actor.name} deleted sub-task "${subTask.title}"`,
+
+            todo: parentTask._id,
+
+            activity: activity._id,
+
+            metadata: {
+              ...activity.metadata,
+              actor: userId,
+              actorName: actor.name,
+            },
+
+            isRead: false,
+          })
+        );
+
+        createdNotifications =
+          await Notification.insertMany(
+            notifications,
+            {
+              session,
+            }
+          );
       }
     });
 
@@ -776,13 +965,19 @@ const deleteSubTask = async (req, res) => {
 
     if (recipientIds.length > 0) {
       recipientIds.forEach((recipientId) => {
-        const userNotifications = createdNotifications.filter(
-          (notification) => notification.user.toString() === recipientId
-        );
+        const userNotifications =
+          createdNotifications.filter(
+            (notification) =>
+              notification.user.toString() ===
+              recipientId
+          );
 
-        io.to(`user:${recipientId}`).emit("notification", {
-          notifications: userNotifications,
-        });
+        io.to(`user:${recipientId}`).emit(
+          "notification",
+          {
+            notifications: userNotifications,
+          }
+        );
       });
     }
 
@@ -790,7 +985,10 @@ const deleteSubTask = async (req, res) => {
     // STEP 11: REAL-TIME ACTIVITY
     // ===================================================
 
-    io.to(`task:${taskId}`).emit("task:activity", activity);
+    io.to(`task:${taskId}`).emit(
+      "task:activity",
+      activity
+    );
 
     // ===================================================
     // STEP 12: RESPONSE
@@ -799,7 +997,12 @@ const deleteSubTask = async (req, res) => {
     return res
       .status(200)
       .json(
-        new ApiResponse(200, updatedTask, "Sub-task deleted successfully", true)
+        new ApiResponse(
+          200,
+          updatedTask,
+          "Sub-task deleted successfully",
+          true
+        )
       );
   } catch (error) {
     console.error("Delete SubTask Error:", error);
@@ -818,4 +1021,5 @@ const deleteSubTask = async (req, res) => {
     await session.endSession();
   }
 };
+
 export { updateSubTask, updateSubTaskStatus, deleteSubTask };
