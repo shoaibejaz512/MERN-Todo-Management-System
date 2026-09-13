@@ -6,7 +6,7 @@ import { Notification } from "../models/notification.model.js";
 import { io } from "../../server.js";
 import { Todo } from "../models/todo.model.js";
 
-export const updateSubTask = async (req, res) => {
+const updateSubTask = async (req, res) => {
   const session = await mongoose.startSession();
 
   try {
@@ -449,7 +449,7 @@ export const updateSubTask = async (req, res) => {
   }
 };
 
-export const updateSubTaskStatus = async (req, res) => {
+const updateSubTaskStatus = async (req, res) => {
   // =====================================================
   // START SESSION
   // =====================================================
@@ -751,14 +751,7 @@ const deleteSubTask = async (req, res) => {
     ) {
       return res
         .status(400)
-        .json(
-          new ApiResponse(
-            400,
-            null,
-            "Invalid task or sub-task ID",
-            false
-          )
-        );
+        .json(new ApiResponse(400, null, "Invalid task or sub-task ID", false));
     }
 
     let updatedTask;
@@ -812,9 +805,7 @@ const deleteSubTask = async (req, res) => {
       // STEP 4: GET ACTOR / USER NAME
       // ===================================================
 
-      const actor = await User.findById(userId)
-        .select("name")
-        .session(session);
+      const actor = await User.findById(userId).select("name").session(session);
 
       if (!actor) {
         const error = new Error("User not found.");
@@ -847,9 +838,7 @@ const deleteSubTask = async (req, res) => {
       );
 
       if (!updatedTask) {
-        const error = new Error(
-          "Sub-task could not be removed."
-        );
+        const error = new Error("Sub-task could not be removed.");
 
         error.statusCode = 400;
         throw error;
@@ -872,13 +861,9 @@ const deleteSubTask = async (req, res) => {
       recipientIds = [
         ...new Set(
           (parentTask.participants || [])
-            .map((participant) =>
-              participant.user?.toString()
-            )
+            .map((participant) => participant.user?.toString())
             .filter(
-              (participantId) =>
-                participantId &&
-                participantId !== userId
+              (participantId) => participantId && participantId !== userId
             )
         ),
       ];
@@ -923,39 +908,33 @@ const deleteSubTask = async (req, res) => {
       // ===================================================
 
       if (recipientIds.length > 0) {
-        const notifications = recipientIds.map(
-          (recipientId) => ({
-            user: recipientId,
+        const notifications = recipientIds.map((recipientId) => ({
+          user: recipientId,
 
-            sender: userId,
+          sender: userId,
 
-            type: "TASK_UPDATED",
+          type: "TASK_UPDATED",
 
-            title: "Sub-task Deleted",
+          title: "Sub-task Deleted",
 
-            message: `${actor.name} deleted sub-task "${subTask.title}"`,
+          message: `${actor.name} deleted sub-task "${subTask.title}"`,
 
-            todo: parentTask._id,
+          todo: parentTask._id,
 
-            activity: activity._id,
+          activity: activity._id,
 
-            metadata: {
-              ...activity.metadata,
-              actor: userId,
-              actorName: actor.name,
-            },
+          metadata: {
+            ...activity.metadata,
+            actor: userId,
+            actorName: actor.name,
+          },
 
-            isRead: false,
-          })
-        );
+          isRead: false,
+        }));
 
-        createdNotifications =
-          await Notification.insertMany(
-            notifications,
-            {
-              session,
-            }
-          );
+        createdNotifications = await Notification.insertMany(notifications, {
+          session,
+        });
       }
     });
 
@@ -965,19 +944,13 @@ const deleteSubTask = async (req, res) => {
 
     if (recipientIds.length > 0) {
       recipientIds.forEach((recipientId) => {
-        const userNotifications =
-          createdNotifications.filter(
-            (notification) =>
-              notification.user.toString() ===
-              recipientId
-          );
-
-        io.to(`user:${recipientId}`).emit(
-          "notification",
-          {
-            notifications: userNotifications,
-          }
+        const userNotifications = createdNotifications.filter(
+          (notification) => notification.user.toString() === recipientId
         );
+
+        io.to(`user:${recipientId}`).emit("notification", {
+          notifications: userNotifications,
+        });
       });
     }
 
@@ -985,10 +958,7 @@ const deleteSubTask = async (req, res) => {
     // STEP 11: REAL-TIME ACTIVITY
     // ===================================================
 
-    io.to(`task:${taskId}`).emit(
-      "task:activity",
-      activity
-    );
+    io.to(`task:${taskId}`).emit("task:activity", activity);
 
     // ===================================================
     // STEP 12: RESPONSE
@@ -997,12 +967,7 @@ const deleteSubTask = async (req, res) => {
     return res
       .status(200)
       .json(
-        new ApiResponse(
-          200,
-          updatedTask,
-          "Sub-task deleted successfully",
-          true
-        )
+        new ApiResponse(200, updatedTask, "Sub-task deleted successfully", true)
       );
   } catch (error) {
     console.error("Delete SubTask Error:", error);
@@ -1022,4 +987,25 @@ const deleteSubTask = async (req, res) => {
   }
 };
 
-export { updateSubTask, updateSubTaskStatus, deleteSubTask };
+const restoreSubTask = async (req, res) => {};
+const assignSubTask = async (req, res) => {};
+const getSubTaskProgress = async (req, res) => {};
+const reorderSubTasks = async (req, res) => {};
+const searchSubTasks = async (req, res) => {};
+const filterSubTasks = async (req, res) => {};
+const getSubTaskHistory = async (req, res) => {};
+const sortSubTasks = async (req, res) => {};
+
+export {
+  updateSubTask,
+  updateSubTaskStatus,
+  deleteSubTask,
+  restoreSubTask,
+  assignSubTask,
+  getSubTaskProgress,
+  reorderSubTasks,
+  searchSubTasks,
+  filterSubTasks,
+  getSubTaskHistory,
+  sortSubTasks,
+};

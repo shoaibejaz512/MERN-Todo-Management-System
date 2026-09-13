@@ -24,6 +24,10 @@ const subTodoSchema = new mongoose.Schema(
       default: "manual",
     },
 
+    assignedTo: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
     priority: {
       type: String,
       enum: {
