@@ -987,7 +987,215 @@ const deleteSubTask = async (req, res) => {
   }
 };
 
-const restoreSubTask = async (req, res) => {};
+const restoreSubTask = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { id: subTaskId, taskId } = req.params;
+    const userId = req.user.userId.toString();
+
+    // =====================================================
+    // STEP 1: VALIDATE IDS
+    // =====================================================
+
+    if (
+      !mongoose.Types.ObjectId.isValid(taskId) ||
+      !mongoose.Types.ObjectId.isValid(subTaskId)
+    ) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task or sub-task ID", false));
+    }
+
+    let parentTask;
+    let restoredSubTask;
+    let recipientIds = [];
+    let notifications = [];
+    let activity = null;
+
+    // =====================================================
+    // STEP 2: TRANSACTION
+    // =====================================================
+
+    await session.withTransaction(async () => {
+      // ---------------------------------------------------
+      // Find parent task + verify ownership + relationship
+      // ---------------------------------------------------
+
+      parentTask = await Todo.findOne({
+        _id: taskId,
+        createdBy: userId,
+        isDeleted: false,
+        isArchived: false,
+        SubTodos: subTaskId,
+      }).session(session);
+
+      if (!parentTask) {
+        const error = new Error(
+          "Task not found or you are not authorized to restore this sub-task."
+        );
+
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // ---------------------------------------------------
+      // Find deleted sub-task
+      // ---------------------------------------------------
+
+      restoredSubTask = await SubTodo.findOne({
+        _id: subTaskId,
+        createdBy: userId,
+        isDeleted: true,
+      }).session(session);
+
+      if (!restoredSubTask) {
+        const error = new Error(
+          "Deleted sub-task not found or you are not authorized to restore it."
+        );
+
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // ---------------------------------------------------
+      // Get actor information
+      // ---------------------------------------------------
+
+      const actor = await User.findById(userId).select("name").session(session);
+
+      if (!actor) {
+        const error = new Error("User not found.");
+
+        error.statusCode = 404;
+        throw error;
+      }
+
+      // ---------------------------------------------------
+      // Restore sub-task
+      // ---------------------------------------------------
+
+      restoredSubTask.isDeleted = false;
+
+      await restoredSubTask.save({ session });
+
+      // ===================================================
+      // STEP 3: FIND COLLABORATORS
+      // ===================================================
+
+      recipientIds = [
+        ...new Set(
+          (parentTask.participants || [])
+            .map((participant) => participant.user?.toString())
+            .filter(
+              (participantId) => participantId && participantId !== userId
+            )
+        ),
+      ];
+
+      // ===================================================
+      // STEP 4: CREATE NOTIFICATIONS
+      // ===================================================
+
+      if (recipientIds.length > 0) {
+        notifications = recipientIds.map((recipientId) => ({
+          user: recipientId,
+          sender: userId,
+          type: "TASK_RESTORED",
+          title: "Sub-task Restored",
+          message: `${actor.name} restored the sub-task "${restoredSubTask.title}"`,
+          todo: taskId,
+        }));
+
+        await Notification.insertMany(notifications, {
+          session,
+        });
+      }
+
+      // ===================================================
+      // STEP 5: CREATE ACTIVITY
+      // ===================================================
+
+      [activity] = await TaskActivity.create(
+        [
+          {
+            todo: taskId,
+            actor: userId,
+            actorName: actor.name,
+            type: "TASK_RESTORED",
+            message: `${actor.name} restored the sub-task "${restoredSubTask.title}"`,
+          },
+        ],
+        { session }
+      );
+
+      if (!activity) {
+        const error = new Error("Failed to create task activity.");
+
+        error.statusCode = 500;
+        throw error;
+      }
+    });
+
+    // =====================================================
+    // STEP 6: SOCKET EVENTS
+    // =====================================================
+
+    // Notify collaborators
+    recipientIds.forEach((recipientId) => {
+      const userNotifications = notifications.filter(
+        (notification) => notification.user.toString() === recipientId
+      );
+
+      if (userNotifications.length > 0) {
+        io.to(`user:${recipientId}`).emit("notification", {
+          notifications: userNotifications,
+        });
+      }
+    });
+
+    // Notify everyone inside task room
+    io.to(`task:${taskId}`).emit("task:activity", activity);
+
+    // Optional: realtime sub-task update
+    io.to(`task:${taskId}`).emit("subtask:restored", {
+      taskId,
+      subTask: restoredSubTask,
+    });
+
+    // =====================================================
+    // STEP 7: RESPONSE
+    // =====================================================
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          taskId,
+          subTask: restoredSubTask,
+          activity,
+        },
+        "Sub-task restored successfully.",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("restoreSubTask error:", error);
+
+    return res
+      .status(error.statusCode || 500)
+      .json(
+        new ApiResponse(
+          error.statusCode || 500,
+          null,
+          error.message || "Failed to restore sub-task.",
+          false
+        )
+      );
+  } finally {
+    await session.endSession();
+  }
+};
 const assignSubTask = async (req, res) => {};
 const getSubTaskProgress = async (req, res) => {};
 const reorderSubTasks = async (req, res) => {};
