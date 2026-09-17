@@ -32,6 +32,7 @@ const notificationSchema = new mongoose.Schema(
         "TASK_ROLE_CHANGED",
         "TASK_ARCHIVED",
         "TASK_COMPLETED",
+        "TASK_ASSIGN",
         "MENTION",
       ],
     },

@@ -5,6 +5,7 @@ import { TaskActivity } from "../models/taskactivity.model.js";
 import { Notification } from "../models/notification.model.js";
 import { io } from "../../server.js";
 import { Todo } from "../models/todo.model.js";
+import { User } from "../models/user.model.js";
 
 const updateSubTask = async (req, res) => {
   const session = await mongoose.startSession();
@@ -1196,7 +1197,186 @@ const restoreSubTask = async (req, res) => {
     await session.endSession();
   }
 };
-const assignSubTask = async (req, res) => {};
+const assignSubTask = async (req, res) => {
+  const session =await mongoose.startSession();
+  try {
+    const { userId, subTaskId, taskId } = req.params;
+    const reqUserId = req.user.userId.toString();
+
+    if (
+      !mongoose.Types.ObjectId.isValid(taskId) ||
+      !mongoose.Types.ObjectId.isValid(subTaskId) ||
+      !mongoose.Types.ObjectId.isValid(userId)
+    ) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task or sub-task ID", false));
+    }
+
+    let subTask;
+    let assignUser;
+    let ownerUser;
+    let task;
+    let notifications = [];
+    let uniqueRecients = [];
+    let activity;
+
+    await session.withTransaction(async () => {
+      task = await Todo.findOne({
+        _id: taskId,
+        isDeleted: false,
+        isArchived: false,
+        createdBy: reqUserId,
+        SubTodos: subTaskId,
+      }).session(session);
+
+      if (!task) {
+        const error = new Error("Task not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      subTask = await SubTodo.findOne({
+        _id: subTaskId,
+        isDeleted: false,
+        createdBy: reqUserId,
+      }).session(session);
+
+      if (!subTask) {
+        const error = new Error("SubTask not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      assignUser = await User.findById(userId).select(
+        "name profileImage friends"
+      );;
+      if (!assignUser) {
+        const error = new Error("assignUser not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      ownerUser = await User.findById(reqUserId).select(
+        "name profileImage friends"
+      );
+      if (!ownerUser) {
+        const error = new Error("ownerUser not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      //check first the user is in frined list of requested user
+      const isFriend = (ownerUser.friends || []).some(
+        (friend) => friend.user.toString() === userId
+      );
+
+      if (!isFriend) {
+        const error = new Error("The user is not in freind list");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      //check the user is participents fo this task
+      let isParticipent = task.participants.find(
+        (p) => p.user.toString() === userId.toString()
+      );
+      if (!isParticipent) {
+        const error = new Error("The user is not participent of task");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      //lets add the user id in subtask model assignTo field
+      subTask.assignedTo = userId;
+      await subTask.save({session});
+
+      uniqueRecients = [
+        ...new Set(
+          (task.participants || [])
+            .map((participant) => participant.user?.toString())
+            .filter(
+              (participantId) => participantId && participantId !== userId
+            )
+        ),
+      ];
+
+      //createnotifications
+      if(uniqueRecients.length > 0){
+        notifications = uniqueRecients.map((user) => ({
+          user:user,
+          sender: reqUserId,
+          type:"TASK_ASSIGN",
+          message:`${ownerUser.name} assigned subtask ${subTask.title} to ${assignUser.name}`,
+        }));
+        await Notification.insertMany(notifications, {session});
+      }
+
+      //create activity
+    const [createdActivity] = await TaskActivity.create(
+      [
+        {
+          todo: taskId,
+          actor: reqUserId,
+          actorName: ownerUser.name,
+          message: `${ownerUser.name} assigned subtask ${subTask.title} to ${assignUser.name}`,
+          metadata: {
+            subTaskId: subTask._id,
+            subTaskTitle: subTask.title,
+            action: "SUBTASK_ASSIGNED",
+          },
+          type: "TASK_ASSIGN",
+        },
+      ],
+      { session }
+    );
+
+    activity = createdActivity;
+    });
+
+    //send socket events
+    if (uniqueRecients.length > 0) {
+      uniqueRecients.forEach((recipientId) => {
+        const userNotifications = notifications.filter(
+          (notification) => notification.user.toString() === recipientId
+        );
+        io.to(`user:${recipientId}`).emit("notification", {
+          notifications: userNotifications,
+        });
+      });
+    }
+
+    //send activity to task room
+    io.to(`task:${taskId}`).emit("task:activity", activity);
+
+    //send response
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          subTask: subTask,
+          activity: activity,
+        },
+        "Sub-task assigned successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("assignSubTask error:", error);
+    return res
+      .status(error.statusCode || 500)
+      .json(
+        new ApiResponse(
+          error.statusCode || 500,
+          null,
+          error.message || "Failed to assign sub-task.",
+          false
+        )
+      );
+  } finally {
+    await session.endSession();
+  }
+};
 const getSubTaskProgress = async (req, res) => {};
 const reorderSubTasks = async (req, res) => {};
 const searchSubTasks = async (req, res) => {};
