@@ -3661,6 +3661,8 @@ const deleteCommentGroupTask = async (req, res) => {
     await session.endSession();
   }
 };
+const getGroupTaskProgress = async (req, res) => {};
+
 
 export {
   createGroupTodo,

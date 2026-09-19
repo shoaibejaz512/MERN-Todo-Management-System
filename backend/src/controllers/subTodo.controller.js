@@ -1198,7 +1198,7 @@ const restoreSubTask = async (req, res) => {
   }
 };
 const assignSubTask = async (req, res) => {
-  const session =await mongoose.startSession();
+  const session = await mongoose.startSession();
   try {
     const { userId, subTaskId, taskId } = req.params;
     const reqUserId = req.user.userId.toString();
@@ -1250,7 +1250,7 @@ const assignSubTask = async (req, res) => {
 
       assignUser = await User.findById(userId).select(
         "name profileImage friends"
-      );;
+      );
       if (!assignUser) {
         const error = new Error("assignUser not found");
         error.statusCode = 404;
@@ -1289,7 +1289,7 @@ const assignSubTask = async (req, res) => {
 
       //lets add the user id in subtask model assignTo field
       subTask.assignedTo = userId;
-      await subTask.save({session});
+      await subTask.save({ session });
 
       uniqueRecients = [
         ...new Set(
@@ -1302,36 +1302,36 @@ const assignSubTask = async (req, res) => {
       ];
 
       //createnotifications
-      if(uniqueRecients.length > 0){
+      if (uniqueRecients.length > 0) {
         notifications = uniqueRecients.map((user) => ({
-          user:user,
+          user: user,
           sender: reqUserId,
-          type:"TASK_ASSIGN",
-          message:`${ownerUser.name} assigned subtask ${subTask.title} to ${assignUser.name}`,
+          type: "TASK_ASSIGN",
+          message: `${ownerUser.name} assigned subtask ${subTask.title} to ${assignUser.name}`,
         }));
-        await Notification.insertMany(notifications, {session});
+        await Notification.insertMany(notifications, { session });
       }
 
       //create activity
-    const [createdActivity] = await TaskActivity.create(
-      [
-        {
-          todo: taskId,
-          actor: reqUserId,
-          actorName: ownerUser.name,
-          message: `${ownerUser.name} assigned subtask ${subTask.title} to ${assignUser.name}`,
-          metadata: {
-            subTaskId: subTask._id,
-            subTaskTitle: subTask.title,
-            action: "SUBTASK_ASSIGNED",
+      const [createdActivity] = await TaskActivity.create(
+        [
+          {
+            todo: taskId,
+            actor: reqUserId,
+            actorName: ownerUser.name,
+            message: `${ownerUser.name} assigned subtask ${subTask.title} to ${assignUser.name}`,
+            metadata: {
+              subTaskId: subTask._id,
+              subTaskTitle: subTask.title,
+              action: "SUBTASK_ASSIGNED",
+            },
+            type: "TASK_ASSIGN",
           },
-          type: "TASK_ASSIGN",
-        },
-      ],
-      { session }
-    );
+        ],
+        { session }
+      );
 
-    activity = createdActivity;
+      activity = createdActivity;
     });
 
     //send socket events
@@ -1377,7 +1377,334 @@ const assignSubTask = async (req, res) => {
     await session.endSession();
   }
 };
-const getSubTaskProgress = async (req, res) => {};
+const getSubTaskProgress = async (req, res) => {
+  try {
+    const { taskId, subTaskId } = req.params;
+    const userId = req.user.userId;
+
+    // =====================================================
+    // STEP 1: VALIDATE IDS
+    // =====================================================
+
+    if (
+      !mongoose.Types.ObjectId.isValid(taskId) ||
+      !mongoose.Types.ObjectId.isValid(subTaskId)
+    ) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task or sub-task ID", false));
+    }
+
+    const taskObjectId = new mongoose.Types.ObjectId(taskId);
+    const subTaskObjectId = new mongoose.Types.ObjectId(subTaskId);
+    const userObjectId = new mongoose.Types.ObjectId(userId);
+
+    // =====================================================
+    // STEP 2: AGGREGATION
+    // =====================================================
+
+    const result = await Todo.aggregate([
+      // ---------------------------------------------------
+      // 1. Find parent task
+      // ---------------------------------------------------
+
+      {
+        $match: {
+          _id: taskObjectId,
+          createdBy: userObjectId,
+          isDeleted: false,
+          isArchived: false,
+
+          // Make sure this subtask belongs to this task
+          SubTodos: subTaskObjectId,
+        },
+      },
+
+      // ---------------------------------------------------
+      // 2. Get all SubTodos of this task
+      // ---------------------------------------------------
+
+      {
+        $lookup: {
+          from: "subtodos",
+          localField: "SubTodos",
+          foreignField: "_id",
+          as: "subTasks",
+        },
+      },
+
+      // ---------------------------------------------------
+      // 3. Calculate overall task progress
+      // ---------------------------------------------------
+
+      {
+        $addFields: {
+          totalSubTasks: {
+            $size: "$subTasks",
+          },
+
+          completedTasks: {
+            $size: {
+              $filter: {
+                input: "$subTasks",
+                as: "subTask",
+                cond: {
+                  $eq: ["$$subTask.status", "COMPLETED"],
+                },
+              },
+            },
+          },
+
+          pendingTasks: {
+            $size: {
+              $filter: {
+                input: "$subTasks",
+                as: "subTask",
+                cond: {
+                  $eq: ["$$subTask.status", "PENDING"],
+                },
+              },
+            },
+          },
+
+          ongoingTasks: {
+            $size: {
+              $filter: {
+                input: "$subTasks",
+                as: "subTask",
+                cond: {
+                  $eq: ["$$subTask.status", "ON_GOING"],
+                },
+              },
+            },
+          },
+
+          incompleteTasks: {
+            $size: {
+              $filter: {
+                input: "$subTasks",
+                as: "subTask",
+                cond: {
+                  $eq: ["$$subTask.status", "IN_COMPLETE"],
+                },
+              },
+            },
+          },
+        },
+      },
+
+      // ---------------------------------------------------
+      // 4. Calculate percentage
+      // ---------------------------------------------------
+
+      {
+        $addFields: {
+          progressPercentage: {
+            $cond: [
+              { $gt: ["$totalSubTasks", 0] },
+              {
+                $round: [
+                  {
+                    $multiply: [
+                      {
+                        $divide: ["$completedTasks", "$totalSubTasks"],
+                      },
+                      100,
+                    ],
+                  },
+                  2,
+                ],
+              },
+              0,
+            ],
+          },
+        },
+      },
+
+      // ---------------------------------------------------
+      // 5. Get requested SubTask
+      // ---------------------------------------------------
+
+      {
+        $addFields: {
+          currentSubTask: {
+            $arrayElemAt: [
+              {
+                $filter: {
+                  input: "$subTasks",
+                  as: "subTask",
+                  cond: {
+                    $eq: ["$$subTask._id", subTaskObjectId],
+                  },
+                },
+              },
+              0,
+            ],
+          },
+        },
+      },
+
+      // ---------------------------------------------------
+      // 6. Participant-wise progress
+      // ---------------------------------------------------
+
+      {
+        $unwind: {
+          path: "$subTasks",
+          preserveNullAndEmptyArrays: true,
+        },
+      },
+
+      {
+        $group: {
+          _id: "$subTasks.assignedTo",
+
+          totalTasks: {
+            $sum: 1,
+          },
+
+          completedTasks: {
+            $sum: {
+              $cond: [
+                {
+                  $eq: ["$subTasks.status", "COMPLETED"],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+
+          pendingTasks: {
+            $sum: {
+              $cond: [
+                {
+                  $eq: ["$subTasks.status", "PENDING"],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+
+          ongoingTasks: {
+            $sum: {
+              $cond: [
+                {
+                  $eq: ["$subTasks.status", "ON_GOING"],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+
+          incompleteTasks: {
+            $sum: {
+              $cond: [
+                {
+                  $eq: ["$subTasks.status", "IN_COMPLETE"],
+                },
+                1,
+                0,
+              ],
+            },
+          },
+        },
+      },
+
+      // ---------------------------------------------------
+      // 7. Participant progress percentage
+      // ---------------------------------------------------
+
+      {
+        $addFields: {
+          progressPercentage: {
+            $cond: [
+              { $gt: ["$totalTasks", 0] },
+              {
+                $round: [
+                  {
+                    $multiply: [
+                      {
+                        $divide: ["$completedTasks", "$totalTasks"],
+                      },
+                      100,
+                    ],
+                  },
+                  2,
+                ],
+              },
+              0,
+            ],
+          },
+        },
+      },
+
+      // ---------------------------------------------------
+      // 8. Put participant progress into array
+      // ---------------------------------------------------
+
+      {
+        $group: {
+          _id: null,
+
+          participantsProgress: {
+            $push: {
+              user: "$_id",
+              totalTasks: "$totalTasks",
+              completedTasks: "$completedTasks",
+              pendingTasks: "$pendingTasks",
+              ongoingTasks: "$ongoingTasks",
+              incompleteTasks: "$incompleteTasks",
+              progressPercentage: "$progressPercentage",
+            },
+          },
+        },
+      },
+
+      // ---------------------------------------------------
+      // 9. Return clean response
+      // ---------------------------------------------------
+
+      {
+        $project: {
+          _id: 0,
+          participantsProgress: 1,
+        },
+      },
+    ]);
+
+    // =====================================================
+    // STEP 3: CHECK TASK
+    // =====================================================
+
+    if (!result.length) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task or sub-task not found", false));
+    }
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          result[0],
+          "Sub-task progress fetched successfully",
+          true
+        )
+      );
+  } catch (error) {
+    console.error("Get SubTask Progress Error:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(500, null, "Failed to fetch sub-task progress", false)
+      );
+  }
+};
 const reorderSubTasks = async (req, res) => {};
 const searchSubTasks = async (req, res) => {};
 const filterSubTasks = async (req, res) => {};

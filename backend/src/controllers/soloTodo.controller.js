@@ -5307,3 +5307,5 @@ export const deleteCommentTask = async (req, res) => {
     await session.endSession();
   }
 };
+
+export const getSingleTaskProgress = async (req, res) => {};
