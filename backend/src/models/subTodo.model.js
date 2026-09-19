@@ -14,7 +14,11 @@ const subTodoSchema = new mongoose.Schema(
       minLength: [20, "minimum length must be 20 chars long"],
       trim: true,
     },
-
+    order: {
+      type: Number,
+      required: true,
+      default: 0,
+    },
     source: {
       type: String,
       enum: {

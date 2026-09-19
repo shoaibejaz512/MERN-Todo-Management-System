@@ -1705,7 +1705,485 @@ const getSubTaskProgress = async (req, res) => {
       );
   }
 };
-const reorderSubTasks = async (req, res) => {};
+const reorderSubTasks = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { taskId } = req.params;
+    const { subTaskIds } = req.body;
+
+    const userId = req.user.userId.toString();
+
+    // =====================================================
+    // STEP 1: VALIDATE TASK ID
+    // =====================================================
+
+    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task ID"));
+    }
+
+    // =====================================================
+    // STEP 2: VALIDATE REQUEST BODY
+    // =====================================================
+
+    if (!Array.isArray(subTaskIds)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "subTaskIds must be an array"));
+    }
+
+    if (subTaskIds.length === 0) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "At least one subtask is required"));
+    }
+
+    // =====================================================
+    // STEP 3: VALIDATE SUBTASK IDS
+    // =====================================================
+
+    const invalidSubTaskId = subTaskIds.some(
+      (id) => !mongoose.Types.ObjectId.isValid(id)
+    );
+
+    if (invalidSubTaskId) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "One or more subtask IDs are invalid")
+        );
+    }
+
+    const requestedSubTaskIds = subTaskIds.map((id) => id.toString());
+
+    // =====================================================
+    // STEP 4: CHECK DUPLICATE SUBTASK IDS
+    // =====================================================
+
+    const uniqueSubTaskIds = new Set(requestedSubTaskIds);
+
+    if (uniqueSubTaskIds.size !== requestedSubTaskIds.length) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "Duplicate subtask IDs are not allowed")
+        );
+    }
+
+    // =====================================================
+    // STEP 5: FIND PARENT TASK
+    // =====================================================
+
+    const parentTask = await Todo.findOne({
+      _id: taskId,
+      isDeleted: false,
+      isArchived: false,
+    })
+      .select("_id title createdBy participants SubTodos")
+      .lean();
+
+    if (!parentTask) {
+      return res.status(404).json(new ApiResponse(404, null, "Task not found"));
+    }
+
+    // =====================================================
+    // STEP 6: CHECK PARTICIPANT
+    // =====================================================
+
+    const participant = (parentTask.participants || []).find(
+      (participant) => participant.user?.toString() === userId
+    );
+
+    if (!participant) {
+      return res
+        .status(403)
+        .json(
+          new ApiResponse(403, null, "You are not a participant of this task")
+        );
+    }
+
+    // =====================================================
+    // STEP 7: CHECK PERMISSION
+    // =====================================================
+
+    if (!["owner", "editor"].includes(participant.role)) {
+      return res
+        .status(403)
+        .json(
+          new ApiResponse(403, null, "You are not allowed to reorder subtasks")
+        );
+    }
+
+    // =====================================================
+    // STEP 8: GET CURRENT SUBTASK ORDER
+    // =====================================================
+
+    const existingSubTaskIds = (parentTask.SubTodos || []).map((id) =>
+      id.toString()
+    );
+
+    // =====================================================
+    // STEP 9: CHECK SAME NUMBER OF SUBTASKS
+    // =====================================================
+
+    if (requestedSubTaskIds.length !== existingSubTaskIds.length) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "You must provide all subtasks when reordering"
+          )
+        );
+    }
+
+    // =====================================================
+    // STEP 10: CHECK ALL SUBTASKS BELONG TO TASK
+    // =====================================================
+
+    const existingSubTaskSet = new Set(existingSubTaskIds);
+
+    const allSubTasksBelongToTask = requestedSubTaskIds.every((id) =>
+      existingSubTaskSet.has(id)
+    );
+
+    if (!allSubTasksBelongToTask) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "One or more subtasks do not belong to this task"
+          )
+        );
+    }
+
+    // =====================================================
+    // STEP 11: CHECK WHETHER ORDER ACTUALLY CHANGED
+    // =====================================================
+
+    const orderChanged = requestedSubTaskIds.some(
+      (id, index) => id !== existingSubTaskIds[index]
+    );
+
+    if (!orderChanged) {
+      return res.status(200).json(
+        new ApiResponse(
+          200,
+          {
+            taskId,
+            changed: false,
+          },
+          "Subtask order is already up to date"
+        )
+      );
+    }
+
+    // =====================================================
+    // STEP 12: GET SUBTASK DETAILS
+    // =====================================================
+
+    const subTasks = await SubTodo.find({
+      _id: {
+        $in: requestedSubTaskIds,
+      },
+    })
+      .select(
+        "_id title description status priority deadline estimatedHours tags assignedTo order"
+      )
+      .lean();
+
+    if (subTasks.length !== requestedSubTaskIds.length) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "One or more subtasks could not be found")
+        );
+    }
+
+    // =====================================================
+    // STEP 13: CREATE SUBTASK MAP
+    // =====================================================
+
+    const subTaskMap = new Map(
+      subTasks.map((subTask) => [subTask._id.toString(), subTask])
+    );
+
+    // =====================================================
+    // STEP 14: GET ACTOR NAME
+    // =====================================================
+
+    const actor = await User.findById(userId).select("name").lean();
+
+    if (!actor) {
+      return res.status(404).json(new ApiResponse(404, null, "User not found"));
+    }
+
+    const actorName = actor.name;
+
+    // =====================================================
+    // STEP 15: CREATE POSITION CHANGES
+    // =====================================================
+
+    const positionChanges = [];
+
+    requestedSubTaskIds.forEach((subTaskId, newIndex) => {
+      const oldIndex = existingSubTaskIds.indexOf(subTaskId);
+
+      if (oldIndex !== newIndex) {
+        const subTask = subTaskMap.get(subTaskId);
+
+        positionChanges.push({
+          subTask: subTaskId,
+          title: subTask?.title || "Untitled subtask",
+
+          oldPosition: oldIndex + 1,
+          newPosition: newIndex + 1,
+        });
+      }
+    });
+
+    // =====================================================
+    // STEP 16: CREATE HUMAN READABLE MESSAGE
+    // =====================================================
+
+    let activityMessage;
+
+    if (positionChanges.length === 1) {
+      const change = positionChanges[0];
+
+      activityMessage = `${actorName} moved "${change.title}" from position ${change.oldPosition} to position ${change.newPosition}.`;
+    } else {
+      const changesText = positionChanges
+        .map(
+          (change) =>
+            `"${change.title}" ${change.oldPosition} → ${change.newPosition}`
+        )
+        .join(", ");
+
+      activityMessage = `${actorName} reordered the subtasks: ${changesText}.`;
+    }
+
+    // =====================================================
+    // STEP 17: START TRANSACTION
+    // =====================================================
+
+    let updatedSubTasks = [];
+
+    await session.withTransaction(async () => {
+      // ===============================================
+      // UPDATE SUBTASK ORDER
+      // ===============================================
+
+      const bulkOperations = requestedSubTaskIds.map((subTaskId, index) => ({
+        updateOne: {
+          filter: {
+            _id: subTaskId,
+          },
+
+          update: {
+            $set: {
+              order: index + 1,
+            },
+          },
+        },
+      }));
+
+      await SubTodo.bulkWrite(bulkOperations, {
+        session,
+        ordered: true,
+      });
+
+      // ===============================================
+      // UPDATE PARENT TODO ORDER
+      // ===============================================
+
+      await Todo.updateOne(
+        {
+          _id: taskId,
+        },
+        {
+          $set: {
+            SubTodos: requestedSubTaskIds.map(
+              (id) => new mongoose.Types.ObjectId(id)
+            ),
+          },
+        },
+        {
+          session,
+        }
+      );
+
+      // ===============================================
+      // CREATE ACTIVITY
+      // ===============================================
+
+      await TaskActivity.create(
+        [
+          {
+            todo: taskId,
+
+            actor: userId,
+
+            // Your schema uses "acotorName"
+            acotorName: actorName,
+
+            type: "SUBTASK_REORDERED",
+
+            message: activityMessage,
+
+            metadata: {
+              oldValue: existingSubTaskIds,
+
+              newValue: requestedSubTaskIds,
+
+              extra: {
+                action: "SUBTASK_REORDERED",
+
+                changes: positionChanges,
+              },
+            },
+          },
+        ],
+        {
+          session,
+        }
+      );
+
+      // ===============================================
+      // FETCH UPDATED SUBTASKS
+      // ===============================================
+
+      updatedSubTasks = await SubTodo.find({
+        _id: {
+          $in: requestedSubTaskIds,
+        },
+      })
+        .select(
+          "_id title description status priority deadline estimatedHours tags assignedTo order"
+        )
+        .populate("assignedTo", "name email profileImage")
+        .sort({
+          order: 1,
+        })
+        .session(session)
+        .lean();
+    });
+
+    // =====================================================
+    // STEP 18: GET ALL PARTICIPANTS
+    // =====================================================
+
+    const recipientIds = [
+      ...new Set(
+        (parentTask.participants || [])
+          .map((participant) => participant.user?.toString())
+          .filter(Boolean)
+      ),
+    ];
+
+    // =====================================================
+    // STEP 19: CREATE NOTIFICATIONS
+    // =====================================================
+
+    if (recipientIds.length > 0) {
+      const notificationDocuments = recipientIds.map((recipientId) => ({
+        recipient: recipientId,
+
+        sender: userId,
+
+        todo: taskId,
+
+        type: "task",
+
+        title: "Subtasks reordered",
+
+        message: activityMessage,
+
+        metadata: {
+          action: "SUBTASK_REORDERED",
+
+          changes: positionChanges,
+        },
+      }));
+
+      await Notification.insertMany(notificationDocuments);
+    }
+
+    // =====================================================
+    // STEP 20: SOCKET.IO TASK UPDATE
+    // =====================================================
+
+    io.to(`task:${taskId}`).emit("task:updated", {
+      type: "SUBTASK_REORDERED",
+
+      taskId,
+
+      updatedBy: {
+        userId,
+        name: actorName,
+      },
+
+      subTasks: updatedSubTasks,
+    });
+
+    // =====================================================
+    // STEP 21: SOCKET.IO NOTIFICATION
+    // =====================================================
+
+    recipientIds.forEach((recipientId) => {
+      io.to(`user:${recipientId}`).emit("notification", {
+        type: "task",
+
+        action: "SUBTASK_REORDERED",
+
+        taskId,
+
+        title: "Subtasks reordered",
+
+        message: activityMessage,
+
+        actor: {
+          userId,
+          name: actorName,
+        },
+      });
+    });
+
+    // =====================================================
+    // STEP 22: RESPONSE
+    // =====================================================
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          taskId,
+
+          changed: true,
+
+          changes: positionChanges,
+
+          subTasks: updatedSubTasks,
+        },
+
+        "Subtasks reordered successfully"
+      )
+    );
+  } catch (error) {
+    console.error("reorderSubTasks error:", error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Failed to reorder subtasks"));
+  } finally {
+    await session.endSession();
+  }
+};
 const searchSubTasks = async (req, res) => {};
 const filterSubTasks = async (req, res) => {};
 const getSubTaskHistory = async (req, res) => {};
