@@ -718,7 +718,7 @@ const deleteMyAccount = async (req, res) => {
     .status(200)
     .json(new ApiResponse(200, null, "Account deleted successfully", true));
 };
-
+const searchUser = async (req,res) => {};
 export {
   registerUser,
   loginUser,
@@ -733,4 +733,5 @@ export {
   getCurrentUser,
   changePassword,
   deleteMyAccount,
+  searchUser,
 };
