@@ -2184,7 +2184,219 @@ const reorderSubTasks = async (req, res) => {
     await session.endSession();
   }
 };
-const searchSubTasks = async (req, res) => {};
+const searchSubTasks = async (req, res) => {
+  try {
+    // =====================================================
+    // STEP 1: GET REQUEST DATA
+    // =====================================================
+
+    const { taskId } = req.params;
+    const { q, page = 1, limit = 10 } = req.query;
+
+    const userId = req.user.userId.toString();
+
+    // =====================================================
+    // STEP 2: VALIDATE TASK ID
+    // =====================================================
+
+    if (!taskId || !mongoose.Types.ObjectId.isValid(taskId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task ID"));
+    }
+
+    // =====================================================
+    // STEP 3: VALIDATE SEARCH QUERY
+    // =====================================================
+
+    const searchQuery = q?.trim();
+
+    if (!searchQuery) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Search query is required"));
+    }
+
+    if (searchQuery.length < 2) {
+      return res.status(400).json(
+        new ApiResponse(
+          400,
+          null,
+          "Search query must contain at least 2 characters"
+        )
+      );
+    }
+
+    // Prevent unnecessarily large queries
+    if (searchQuery.length > 100) {
+      return res.status(400).json(
+        new ApiResponse(
+          400,
+          null,
+          "Search query cannot exceed 100 characters"
+        )
+      );
+    }
+
+    // =====================================================
+    // STEP 4: VALIDATE PAGINATION
+    // =====================================================
+
+    const parsedPage = Number.parseInt(page, 10);
+    const parsedLimit = Number.parseInt(limit, 10);
+
+    if (
+      Number.isNaN(parsedPage) ||
+      Number.isNaN(parsedLimit) ||
+      parsedPage < 1 ||
+      parsedLimit < 1
+    ) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid pagination values"));
+    }
+
+    // Maximum 50 results per request
+    const safeLimit = Math.min(parsedLimit, 50);
+
+    const skip = (parsedPage - 1) * safeLimit;
+
+    // =====================================================
+    // STEP 5: FIND TASK + CHECK ACCESS
+    // =====================================================
+
+    const task = await Todo.findOne({
+      _id: taskId,
+
+      isDeleted: false,
+      isArchived: false,
+
+      $or: [
+        {
+          createdBy: userId,
+        },
+        {
+          participants: {
+            $elemMatch: {
+              user: userId,
+            },
+          },
+        },
+      ],
+    })
+      .select("_id SubTodos")
+      .lean();
+
+    // =====================================================
+    // STEP 6: TASK NOT FOUND / ACCESS DENIED
+    // =====================================================
+
+    if (!task) {
+      return res.status(404).json(
+        new ApiResponse(
+          404,
+          null,
+          "Task not found or you do not have access to this task"
+        )
+      );
+    }
+
+    // =====================================================
+    // STEP 7: SEARCH SUBTASKS
+    // =====================================================
+
+    const normalizedSearch = searchQuery.replace(
+      /[.*+?^${}()|[\]\\]/g,
+      "\\$&"
+    );
+
+    const searchRegex = new RegExp(normalizedSearch, "i");
+
+    const subtasks = (task.SubTodos || []).filter((subTask) => {
+      // Ignore deleted subtasks
+      if (subTask.isDeleted === true) {
+        return false;
+      }
+
+      // Search in title
+      if (searchRegex.test(subTask.title || "")) {
+        return true;
+      }
+
+      // Search in description
+      if (searchRegex.test(subTask.description || "")) {
+        return true;
+      }
+
+      // Search in tags
+      if (
+        Array.isArray(subTask.tags) &&
+        subTask.tags.some((tag) => searchRegex.test(tag || ""))
+      ) {
+        return true;
+      }
+
+      return false;
+    });
+
+    // =====================================================
+    // STEP 8: SORT RESULTS
+    // =====================================================
+
+    subtasks.sort((a, b) => {
+      return (a.order ?? 0) - (b.order ?? 0);
+    });
+
+    // =====================================================
+    // STEP 9: PAGINATION
+    // =====================================================
+
+    const totalSubTasks = subtasks.length;
+
+    const totalPages =
+      totalSubTasks === 0
+        ? 0
+        : Math.ceil(totalSubTasks / safeLimit);
+
+    const paginatedSubTasks = subtasks.slice(
+      skip,
+      skip + safeLimit
+    );
+
+    // =====================================================
+    // STEP 10: RESPONSE
+    // =====================================================
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          subtasks: paginatedSubTasks,
+          pagination: {
+            currentPage: parsedPage,
+            limit: safeLimit,
+            totalSubTasks,
+            totalPages,
+            hasNextPage: parsedPage < totalPages,
+            hasPreviousPage: parsedPage > 1,
+          },
+          search: searchQuery,
+        },
+        "Subtasks fetched successfully"
+      )
+    );
+  } catch (error) {
+    console.error("searchSubTasks error:", error);
+
+    return res.status(500).json(
+      new ApiResponse(
+        500,
+        null,
+        "Something went wrong while searching subtasks"
+      )
+    );
+  }
+};
 const filterSubTasks = async (req, res) => {};
 const getSubTaskHistory = async (req, res) => {};
 const sortSubTasks = async (req, res) => {};
