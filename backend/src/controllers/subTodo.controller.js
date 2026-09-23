@@ -2218,24 +2218,28 @@ const searchSubTasks = async (req, res) => {
     }
 
     if (searchQuery.length < 2) {
-      return res.status(400).json(
-        new ApiResponse(
-          400,
-          null,
-          "Search query must contain at least 2 characters"
-        )
-      );
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Search query must contain at least 2 characters"
+          )
+        );
     }
 
     // Prevent unnecessarily large queries
     if (searchQuery.length > 100) {
-      return res.status(400).json(
-        new ApiResponse(
-          400,
-          null,
-          "Search query cannot exceed 100 characters"
-        )
-      );
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Search query cannot exceed 100 characters"
+          )
+        );
     }
 
     // =====================================================
@@ -2292,23 +2296,22 @@ const searchSubTasks = async (req, res) => {
     // =====================================================
 
     if (!task) {
-      return res.status(404).json(
-        new ApiResponse(
-          404,
-          null,
-          "Task not found or you do not have access to this task"
-        )
-      );
+      return res
+        .status(404)
+        .json(
+          new ApiResponse(
+            404,
+            null,
+            "Task not found or you do not have access to this task"
+          )
+        );
     }
 
     // =====================================================
     // STEP 7: SEARCH SUBTASKS
     // =====================================================
 
-    const normalizedSearch = searchQuery.replace(
-      /[.*+?^${}()|[\]\\]/g,
-      "\\$&"
-    );
+    const normalizedSearch = searchQuery.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
     const searchRegex = new RegExp(normalizedSearch, "i");
 
@@ -2354,14 +2357,9 @@ const searchSubTasks = async (req, res) => {
     const totalSubTasks = subtasks.length;
 
     const totalPages =
-      totalSubTasks === 0
-        ? 0
-        : Math.ceil(totalSubTasks / safeLimit);
+      totalSubTasks === 0 ? 0 : Math.ceil(totalSubTasks / safeLimit);
 
-    const paginatedSubTasks = subtasks.slice(
-      skip,
-      skip + safeLimit
-    );
+    const paginatedSubTasks = subtasks.slice(skip, skip + safeLimit);
 
     // =====================================================
     // STEP 10: RESPONSE
@@ -2388,16 +2386,185 @@ const searchSubTasks = async (req, res) => {
   } catch (error) {
     console.error("searchSubTasks error:", error);
 
-    return res.status(500).json(
-      new ApiResponse(
-        500,
-        null,
-        "Something went wrong while searching subtasks"
-      )
-    );
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          "Something went wrong while searching subtasks"
+        )
+      );
   }
 };
-const filterSubTasks = async (req, res) => {};
+const filterSubTasks = async (req, res) => {
+  try {
+    const { taskId } = req.params;
+
+    const { status, priority, overdue, sortOrder = "asc" } = req.query;
+
+    const userId = req.user.userId;
+
+    // --------------------------------------------------
+    // 1. Validate taskId
+    // --------------------------------------------------
+    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task ID", false));
+    }
+
+    // --------------------------------------------------
+    // 2. Validate sortOrder
+    // --------------------------------------------------
+    if (!["asc", "desc"].includes(sortOrder)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "sortOrder must be either 'asc' or 'desc'",
+            false
+          )
+        );
+    }
+
+    // --------------------------------------------------
+    // 3. Validate status
+    // --------------------------------------------------
+    const allowedStatuses = ["PENDING", "ON_GOING", "COMPLETED", "IN_COMPLETE"];
+
+    if (status && !allowedStatuses.includes(status)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            `Invalid status. Allowed values: ${allowedStatuses.join(", ")}`,
+            false
+          )
+        );
+    }
+
+    // --------------------------------------------------
+    // 4. Validate priority
+    // --------------------------------------------------
+    const allowedPriorities = ["LOW", "MEDIUM", "HIGH"];
+
+    if (priority && !allowedPriorities.includes(priority)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            `Invalid priority. Allowed values: ${allowedPriorities.join(", ")}`,
+            false
+          )
+        );
+    }
+
+    // --------------------------------------------------
+    // 5. Check parent task access
+    // --------------------------------------------------
+    const task = await Todo.findOne({
+      _id: taskId,
+      $or: [{ createdBy: userId }, { "participants.user": userId }],
+      isDeleted: false,
+      isArchived: false,
+    }).select("_id");
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(
+          new ApiResponse(
+            404,
+            null,
+            "Task not found or you do not have access to this task",
+            false
+          )
+        );
+    }
+
+    // --------------------------------------------------
+    // 6. Build dynamic filter
+    // --------------------------------------------------
+    const filter = {
+      todo: taskId,
+      isDeleted: false,
+    };
+
+    if (status) {
+      filter.status = status;
+    }
+
+    if (priority) {
+      filter.priority = priority;
+    }
+
+    // --------------------------------------------------
+    // 7. Handle overdue filter
+    // --------------------------------------------------
+    if (overdue === "true") {
+      filter.deadline = {
+        $lt: new Date(),
+      };
+
+      // Completed tasks cannot be considered overdue
+      filter.status = {
+        $ne: "COMPLETED",
+      };
+    } else if (overdue !== undefined && overdue !== "false") {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "overdue must be either 'true' or 'false'",
+            false
+          )
+        );
+    }
+
+    // --------------------------------------------------
+    // 8. Sorting
+    // --------------------------------------------------
+    const sortValue = sortOrder === "desc" ? -1 : 1;
+
+    // --------------------------------------------------
+    // 9. Fetch filtered subtasks
+    // --------------------------------------------------
+    const subTasks = await SubTodo.find(filter)
+      .sort({ deadline: sortValue })
+      .lean();
+
+    // --------------------------------------------------
+    // 10. Return response
+    // --------------------------------------------------
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(200, subTasks, "SubTasks fetched successfully", true)
+      );
+  } catch (error) {
+    console.error("Error while filtering subtasks:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          "Something went wrong while filtering subtasks",
+          false
+        )
+      );
+  }
+};
 const getSubTaskHistory = async (req, res) => {};
 const sortSubTasks = async (req, res) => {};
 
