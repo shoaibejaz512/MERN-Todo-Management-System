@@ -3578,6 +3578,684 @@ const sortSubTasks = async (req, res) => {
       .json(new ApiResponse(500, null, "Failed to sort subtasks", false));
   }
 };
+
+const duplicateSubTask = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { taskId, subTaskId } = req.params;
+
+    const userId = req.user?.userId;
+
+    // --------------------------------------------------
+    // Authentication
+    // --------------------------------------------------
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    // --------------------------------------------------
+    // Validate IDs
+    // --------------------------------------------------
+    if (
+      !mongoose.isValidObjectId(taskId) ||
+      !mongoose.isValidObjectId(subTaskId)
+    ) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task or subtask id", false));
+    }
+
+    // --------------------------------------------------
+    // Start transaction
+    // --------------------------------------------------
+    session.startTransaction();
+
+    // --------------------------------------------------
+    // Find parent task
+    // --------------------------------------------------
+    const task = await Todo.findOne({
+      _id: taskId,
+      isDeleted: false,
+      isArchived: false,
+    })
+      .select("_id title createdBy participants")
+      .session(session)
+      .lean();
+
+    if (!task) {
+      await session.abortTransaction();
+
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    // --------------------------------------------------
+    // Authorization
+    //
+    // Owner OR participant can duplicate.
+    // --------------------------------------------------
+    const isOwner = task.createdBy.toString() === userId.toString();
+
+    const participant = task.participants?.find(
+      (member) => member.user?.toString() === userId.toString()
+    );
+
+    const isParticipant = Boolean(participant);
+
+    if (!isOwner && !isParticipant) {
+      await session.abortTransaction();
+
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, "Access denied", false));
+    }
+
+    // --------------------------------------------------
+    // Find original subtask
+    // --------------------------------------------------
+    const originalSubTask = await SubTodo.findOne({
+      _id: subTaskId,
+      groupId: taskId,
+      isDeleted: false,
+      isArchived: false,
+    })
+      .session(session)
+      .lean();
+
+    if (!originalSubTask) {
+      await session.abortTransaction();
+
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Subtask not found", false));
+    }
+
+    // --------------------------------------------------
+    // Actor
+    // --------------------------------------------------
+    const actor = await mongoose
+      .model("User")
+      .findById(userId)
+      .select("_id name email profileImage")
+      .session(session)
+      .lean();
+
+    if (!actor) {
+      await session.abortTransaction();
+
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
+    }
+
+    const actorName = actor.name || actor.email;
+
+    // --------------------------------------------------
+    // Validate assigned user
+    //
+    // If original assigned user is no longer a member,
+    // do not carry assignment to duplicated task.
+    // --------------------------------------------------
+    let assignedTo = null;
+
+    if (originalSubTask.assignedTo) {
+      const assignedUserId = originalSubTask.assignedTo.toString();
+
+      const assignedUserIsMember =
+        task.createdBy.toString() === assignedUserId ||
+        task.participants?.some(
+          (member) => member.user?.toString() === assignedUserId
+        );
+
+      if (assignedUserIsMember) {
+        assignedTo = originalSubTask.assignedTo;
+      }
+    }
+
+    // --------------------------------------------------
+    // Generate next order
+    // --------------------------------------------------
+    const lastSubTask = await SubTodo.findOne({
+      groupId: taskId,
+      isDeleted: false,
+    })
+      .sort({ order: -1 })
+      .select("order")
+      .session(session)
+      .lean();
+
+    const nextOrder = (lastSubTask?.order ?? -1) + 1;
+
+    // --------------------------------------------------
+    // Create duplicate
+    // --------------------------------------------------
+    const duplicatedSubTask = await SubTodo.create(
+      [
+        {
+          title: `${originalSubTask.title} (Copy)`,
+
+          description: originalSubTask.description,
+
+          order: nextOrder,
+
+          source: "manual",
+
+          assignedTo,
+
+          priority: originalSubTask.priority,
+
+          estimatedHours: originalSubTask.estimatedHours,
+
+          deadline: originalSubTask.deadline,
+
+          tags: originalSubTask.tags || [],
+
+          groupId: taskId,
+
+          // New duplicate should start fresh
+          status: "PENDING",
+
+          isArchived: false,
+
+          isDeleted: false,
+
+          deletedAt: null,
+        },
+      ],
+      { session }
+    );
+
+    const newSubTask = duplicatedSubTask[0];
+
+    // --------------------------------------------------
+    // Create activity
+    // --------------------------------------------------
+    const activity = await TaskActivity.create(
+      [
+        {
+          todo: taskId,
+
+          actor: userId,
+
+          actorName,
+
+          targetUser: assignedTo || null,
+
+          type: "TASK_UPDATED",
+
+          message: `${actorName} duplicated subtask "${originalSubTask.title}"`,
+
+          metadata: {
+            oldValue: originalSubTask._id,
+            newValue: newSubTask._id,
+
+            extra: {
+              action: "SUBTASK_DUPLICATED",
+              originalSubTaskId: originalSubTask._id,
+              originalSubTaskTitle: originalSubTask.title,
+              newSubTaskId: newSubTask._id,
+              newSubTaskTitle: newSubTask.title,
+            },
+          },
+        },
+      ],
+      { session }
+    );
+
+    // --------------------------------------------------
+    // Notification recipients
+    //
+    // Notify task participants except task owner.
+    // Also don't notify actor.
+    // --------------------------------------------------
+    const recipientIds = new Set();
+
+    task.participants?.forEach((member) => {
+      const memberId = member.user?.toString();
+
+      if (
+        memberId &&
+        memberId !== task.createdBy.toString() &&
+        memberId !== userId.toString()
+      ) {
+        recipientIds.add(memberId);
+      }
+    });
+
+    // --------------------------------------------------
+    // Create notifications
+    // --------------------------------------------------
+    const notifications = Array.from(recipientIds).map((recipientId) => ({
+      user: recipientId,
+
+      sender: userId,
+
+      type: "TASK_UPDATED",
+
+      title: "Subtask duplicated",
+
+      message: `${actorName} duplicated a subtask "${originalSubTask.title}" in "${task.title}"`,
+
+      todo: taskId,
+
+      isRead: false,
+    }));
+
+    if (notifications.length > 0) {
+      await Notification.insertMany(notifications, {
+        session,
+      });
+    }
+
+    // --------------------------------------------------
+    // Commit transaction
+    // --------------------------------------------------
+    await session.commitTransaction();
+
+    // --------------------------------------------------
+    // Socket notifications AFTER transaction commit
+    // --------------------------------------------------
+    const io = req.app.get("io");
+
+    if (io && recipientIds.size > 0) {
+      recipientIds.forEach((recipientId) => {
+        io.to(`user:${recipientId}`).emit("notification", {
+          type: "TASK_UPDATED",
+
+          title: "Subtask duplicated",
+
+          message: `${actorName} duplicated a subtask "${originalSubTask.title}" in "${task.title}"`,
+
+          todo: taskId,
+
+          subTaskId: newSubTask._id,
+
+          sender: {
+            _id: actor._id,
+            name: actor.name,
+            profileImage: actor.profileImage,
+          },
+
+          createdAt: new Date(),
+        });
+      });
+    }
+
+    // --------------------------------------------------
+    // Response
+    // --------------------------------------------------
+    return res.status(201).json(
+      new ApiResponse(
+        201,
+        {
+          subTask: newSubTask,
+
+          duplicatedFrom: {
+            subTaskId: originalSubTask._id,
+            title: originalSubTask.title,
+          },
+
+          activity: activity[0],
+
+          notificationsSent: recipientIds.size,
+        },
+        "Subtask duplicated successfully",
+        true
+      )
+    );
+  } catch (error) {
+    await session.abortTransaction();
+
+    console.error("duplicateSubTask error:", error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Failed to duplicate subtask", false));
+  } finally {
+    await session.endSession();
+  }
+};
+
+
+const getOverdueSubTasks = async (req, res) => {
+  try {
+    const { taskId } = req.params;
+
+    const userId = req.user?.userId;
+
+    const { page = 1, limit = 20 } = req.query;
+
+    // --------------------------------------------------
+    // Authentication
+    // --------------------------------------------------
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    // --------------------------------------------------
+    // Validate task ID
+    // --------------------------------------------------
+    if (!mongoose.isValidObjectId(taskId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task id", false));
+    }
+
+    // --------------------------------------------------
+    // Validate pagination
+    // --------------------------------------------------
+    const pageNumber = Number(page);
+    const limitNumber = Number(limit);
+
+    if (
+      !Number.isInteger(pageNumber) ||
+      pageNumber < 1 ||
+      !Number.isInteger(limitNumber) ||
+      limitNumber < 1 ||
+      limitNumber > 100
+    ) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "Invalid pagination parameters", false)
+        );
+    }
+
+    const skip = (pageNumber - 1) * limitNumber;
+
+    // --------------------------------------------------
+    // Find parent task
+    // --------------------------------------------------
+    const task = await Todo.findOne({
+      _id: taskId,
+      isDeleted: false,
+      isArchived: false,
+    })
+      .select("_id title createdBy participants")
+      .lean();
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    // --------------------------------------------------
+    // Authorization
+    // --------------------------------------------------
+    const isOwner = task.createdBy.toString() === userId.toString();
+
+    const isParticipant = task.participants?.some(
+      (participant) => participant.user?.toString() === userId.toString()
+    );
+
+    if (!isOwner && !isParticipant) {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, "Access denied", false));
+    }
+
+    // --------------------------------------------------
+    // Current time
+    // --------------------------------------------------
+    const now = new Date();
+
+    // --------------------------------------------------
+    // Fetch overdue subtasks + total count
+    // --------------------------------------------------
+    const [subTasks, total] = await Promise.all([
+      SubTodo.find({
+        groupId: taskId,
+        isDeleted: false,
+        isArchived: false,
+
+        deadline: {
+          $exists: true,
+          $ne: null,
+          $lt: now,
+        },
+
+        status: {
+          $ne: "COMPLETED",
+        },
+      })
+        .populate({
+          path: "assignedTo",
+          select: "_id name email profileImage",
+        })
+        .sort({
+          deadline: 1,
+        })
+        .skip(skip)
+        .limit(limitNumber)
+        .lean(),
+
+      SubTodo.countDocuments({
+        groupId: taskId,
+        isDeleted: false,
+        isArchived: false,
+
+        deadline: {
+          $exists: true,
+          $ne: null,
+          $lt: now,
+        },
+
+        status: {
+          $ne: "COMPLETED",
+        },
+      }),
+    ]);
+
+    // --------------------------------------------------
+    // Add overdue duration
+    // --------------------------------------------------
+    const formattedSubTasks = subTasks.map((subTask) => ({
+      ...subTask,
+
+      overdueByMs: now.getTime() - new Date(subTask.deadline).getTime(),
+
+      overdueByDays: Math.floor(
+        (now.getTime() - new Date(subTask.deadline).getTime()) /
+          (1000 * 60 * 60 * 24)
+      ),
+    }));
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          taskId,
+          taskTitle: task.title,
+
+          subTasks: formattedSubTasks,
+
+          pagination: {
+            total,
+            page: pageNumber,
+            limit: limitNumber,
+            totalPages: Math.ceil(total / limitNumber),
+            hasNextPage: pageNumber * limitNumber < total,
+            hasPreviousPage: pageNumber > 1,
+          },
+        },
+        "Overdue subtasks fetched successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("getOverdueSubTasks error:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(500, null, "Failed to fetch overdue subtasks", false)
+      );
+  }
+};
+
+
+const getSubTaskStats = async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const userId = req.user?.userId;
+
+    // --------------------------------------------------
+    // Validate authentication
+    // --------------------------------------------------
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    // --------------------------------------------------
+    // Validate task ID
+    // --------------------------------------------------
+    if (!mongoose.isValidObjectId(taskId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task id", false));
+    }
+
+    // --------------------------------------------------
+    // Find parent task
+    // --------------------------------------------------
+    const task = await Todo.findOne({
+      _id: taskId,
+      isDeleted: false,
+      isArchived: false,
+    })
+      .select("_id createdBy participants")
+      .lean();
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    // --------------------------------------------------
+    // Authorization
+    // Owner OR assigned user can access stats
+    // --------------------------------------------------
+    const isOwner = task.createdBy.toString() === userId.toString();
+
+    const isParticipant = task.participants?.some(
+      (participant) => participant.user?.toString() === userId.toString()
+    );
+
+    if (!isOwner && !isParticipant) {
+      return res
+        .status(403)
+        .json(new ApiResponse(403, null, "Access denied", false));
+    }
+
+    // --------------------------------------------------
+    // Calculate statistics
+    // --------------------------------------------------
+    const stats = await SubTodo.aggregate([
+      {
+        $match: {
+          groupId: new mongoose.Types.ObjectId(taskId),
+          isDeleted: false,
+          isArchived: false,
+        },
+      },
+      {
+        $facet: {
+          total: [{ $count: "count" }],
+
+          completed: [{ $match: { status: "COMPLETED" } }, { $count: "count" }],
+
+          pending: [{ $match: { status: "PENDING" } }, { $count: "count" }],
+
+          ongoing: [{ $match: { status: "ON_GOING" } }, { $count: "count" }],
+
+          started: [{ $match: { status: "START" } }, { $count: "count" }],
+
+          incomplete: [
+            { $match: { status: "IN_COMPLETE" } },
+            { $count: "count" },
+          ],
+
+          overdue: [
+            {
+              $match: {
+                deadline: { $lt: new Date() },
+                status: { $ne: "COMPLETED" },
+              },
+            },
+            { $count: "count" },
+          ],
+
+          highPriority: [{ $match: { priority: "high" } }, { $count: "count" }],
+
+          mediumPriority: [
+            { $match: { priority: "medium" } },
+            { $count: "count" },
+          ],
+
+          lowPriority: [{ $match: { priority: "low" } }, { $count: "count" }],
+        },
+      },
+    ]);
+
+    const result = stats[0];
+
+    const total = result.total[0]?.count || 0;
+    const completed = result.completed[0]?.count || 0;
+
+    const completionPercentage =
+      total > 0 ? Math.round((completed / total) * 100) : 0;
+
+    const response = {
+      taskId,
+
+      total,
+      completed,
+      pending: result.pending[0]?.count || 0,
+      ongoing: result.ongoing[0]?.count || 0,
+      started: result.started[0]?.count || 0,
+      incomplete: result.incomplete[0]?.count || 0,
+      overdue: result.overdue[0]?.count || 0,
+
+      completionPercentage,
+
+      priority: {
+        high: result.highPriority[0]?.count || 0,
+        medium: result.mediumPriority[0]?.count || 0,
+        low: result.lowPriority[0]?.count || 0,
+      },
+    };
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          response,
+          "Subtask statistics fetched successfully",
+          true
+        )
+      );
+  } catch (error) {
+    console.error("getSubTaskStats error:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(500, null, "Failed to fetch subtask statistics", false)
+      );
+  }
+};
+
 export {
   updateSubTask,
   updateSubTaskStatus,
@@ -3592,4 +4270,7 @@ export {
   sortSubTasks,
   createSubTask,
   getSubTaskById,
+  getOverdueSubTasks,
+  getOverdueSubTasks,
+  duplicateSubTask,
 };
