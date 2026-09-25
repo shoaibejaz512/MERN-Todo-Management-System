@@ -2756,8 +2756,349 @@ const getSubTaskHistory = async (req, res) => {
       );
   }
 };
-const sortSubTasks = async (req, res) => {};
+const sortSubTasks = async (req, res) => {
+  try {
+    const { taskId } = req.params;
 
+    const {
+      sortBy = "order",
+      sortOrder = "asc",
+      page = 1,
+      limit = 20,
+    } = req.query;
+
+    const userId = req.user.userId;
+
+    // --------------------------------------------------
+    // 1. Validate authenticated user
+    // --------------------------------------------------
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Authentication required", false));
+    }
+
+    // --------------------------------------------------
+    // 2. Validate task ID
+    // --------------------------------------------------
+    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task ID", false));
+    }
+
+    // --------------------------------------------------
+    // 3. Validate sortBy
+    // --------------------------------------------------
+    const allowedSortFields = [
+      "order",
+      "title",
+      "priority",
+      "status",
+      "deadline",
+      "estimatedHours",
+      "createdAt",
+      "updatedAt",
+    ];
+
+    if (!allowedSortFields.includes(sortBy)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            `Invalid sort field. Allowed fields: ${allowedSortFields.join(
+              ", "
+            )}`,
+            false
+          )
+        );
+    }
+
+    // --------------------------------------------------
+    // 4. Validate sort order
+    // --------------------------------------------------
+    const normalizedSortOrder = sortOrder.toLowerCase();
+
+    if (!["asc", "desc"].includes(normalizedSortOrder)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "sortOrder must be either asc or desc",
+            false
+          )
+        );
+    }
+
+    // --------------------------------------------------
+    // 5. Validate pagination
+    // --------------------------------------------------
+    const parsedPage = Number(page);
+    const parsedLimit = Number(limit);
+
+    if (!Number.isInteger(parsedPage) || parsedPage < 1) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "Page must be a positive integer", false)
+        );
+    }
+
+    if (
+      !Number.isInteger(parsedLimit) ||
+      parsedLimit < 1 ||
+      parsedLimit > 100
+    ) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "Limit must be between 1 and 100", false)
+        );
+    }
+
+    const skip = (parsedPage - 1) * parsedLimit;
+
+    // --------------------------------------------------
+    // 6. Find parent task
+    // --------------------------------------------------
+    const task = await Todo.findOne({
+      _id: taskId,
+      isDeleted: false,
+      isArchived: false,
+    })
+      .select("_id title createdBy")
+      .lean();
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    // --------------------------------------------------
+    // 7. Verify user access to parent task
+    //
+    // Owner OR participant can view/sort subtasks.
+    // Modification authorization remains separate.
+    // --------------------------------------------------
+    const isOwner = task.createdBy?.toString() === userId.toString();
+
+    const participant = await Todo.exists({
+      _id: taskId,
+      "participants.user": userId,
+    });
+
+    if (!isOwner && !participant) {
+      return res
+        .status(403)
+        .json(
+          new ApiResponse(
+            403,
+            null,
+            "You are not authorized to access this task",
+            false
+          )
+        );
+    }
+
+    // --------------------------------------------------
+    // 8. Build sort configuration
+    // --------------------------------------------------
+    const direction = normalizedSortOrder === "asc" ? 1 : -1;
+
+    let sortStage = {};
+
+    // --------------------------------------------------
+    // 9. Custom priority sorting
+    // --------------------------------------------------
+    if (sortBy === "priority") {
+      sortStage = {
+        priorityRank: direction,
+        order: 1,
+        _id: 1,
+      };
+    }
+
+    // --------------------------------------------------
+    // 10. Custom status sorting
+    // --------------------------------------------------
+    else if (sortBy === "status") {
+      sortStage = {
+        statusRank: direction,
+        order: 1,
+        _id: 1,
+      };
+    }
+
+    // --------------------------------------------------
+    // 11. Normal field sorting
+    // --------------------------------------------------
+    else {
+      sortStage = {
+        [sortBy]: direction,
+        _id: 1,
+      };
+    }
+
+    // --------------------------------------------------
+    // 12. Build aggregation pipeline
+    // --------------------------------------------------
+    const pipeline = [
+      {
+        $match: {
+          todo: new mongoose.Types.ObjectId(taskId),
+          isDeleted: false,
+          isArchived: false,
+        },
+      },
+
+      // ----------------------------------------------
+      // Priority ranking
+      // ----------------------------------------------
+      {
+        $addFields: {
+          priorityRank: {
+            $switch: {
+              branches: [
+                {
+                  case: {
+                    $eq: ["$priority", "HIGH"],
+                  },
+                  then: 3,
+                },
+                {
+                  case: {
+                    $eq: ["$priority", "MEDIUM"],
+                  },
+                  then: 2,
+                },
+                {
+                  case: {
+                    $eq: ["$priority", "LOW"],
+                  },
+                  then: 1,
+                },
+              ],
+              default: 0,
+            },
+          },
+
+          // --------------------------------------------
+          // Status ranking
+          // --------------------------------------------
+          statusRank: {
+            $switch: {
+              branches: [
+                {
+                  case: {
+                    $eq: ["$status", "ON_GOING"],
+                  },
+                  then: 3,
+                },
+                {
+                  case: {
+                    $eq: ["$status", "PENDING"],
+                  },
+                  then: 2,
+                },
+                {
+                  case: {
+                    $eq: ["$status", "COMPLETED"],
+                  },
+                  then: 1,
+                },
+              ],
+              default: 0,
+            },
+          },
+        },
+      },
+
+      // ----------------------------------------------
+      // Sort
+      // ----------------------------------------------
+      {
+        $sort: sortStage,
+      },
+
+      // ----------------------------------------------
+      // Pagination
+      // ----------------------------------------------
+      {
+        $skip: skip,
+      },
+
+      {
+        $limit: parsedLimit,
+      },
+
+      // ----------------------------------------------
+      // Remove internal calculated fields
+      // ----------------------------------------------
+      {
+        $project: {
+          priorityRank: 0,
+          statusRank: 0,
+        },
+      },
+    ];
+
+    // --------------------------------------------------
+    // 13. Execute query + count in parallel
+    // --------------------------------------------------
+    const [subTasks, totalSubTasks] = await Promise.all([
+      SubTodo.aggregate(pipeline),
+
+      SubTodo.countDocuments({
+        todo: taskId,
+        isDeleted: false,
+        isArchived: false,
+      }),
+    ]);
+
+    // --------------------------------------------------
+    // 14. Pagination metadata
+    // --------------------------------------------------
+    const totalPages = Math.ceil(totalSubTasks / parsedLimit);
+
+    const pagination = {
+      currentPage: parsedPage,
+      limit: parsedLimit,
+      totalItems: totalSubTasks,
+      totalPages,
+      hasNextPage: parsedPage < totalPages,
+      hasPreviousPage: parsedPage > 1,
+    };
+
+    // --------------------------------------------------
+    // 15. Success response
+    // --------------------------------------------------
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          taskId,
+          sortBy,
+          sortOrder: normalizedSortOrder,
+          subTasks,
+          pagination,
+        },
+        "Subtasks sorted successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("sortSubTasks error:", error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Failed to sort subtasks", false));
+  }
+};
 export {
   updateSubTask,
   updateSubTaskStatus,
