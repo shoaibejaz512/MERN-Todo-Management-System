@@ -34,6 +34,7 @@ const notificationSchema = new mongoose.Schema(
         "TASK_COMPLETED",
         "TASK_ASSIGN",
         "MENTION",
+        "SUBTASK_CREATED",
       ],
     },
 

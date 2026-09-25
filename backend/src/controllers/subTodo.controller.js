@@ -7,6 +7,485 @@ import { io } from "../../server.js";
 import { Todo } from "../models/todo.model.js";
 import { User } from "../models/user.model.js";
 
+
+const createSubTask = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { taskId } = req.params;
+
+    const {
+      title,
+      description,
+      assignedTo,
+      priority = "medium",
+      estimatedHours = 0,
+      deadline = null,
+      tags = [],
+      source = "manual",
+      status = "START",
+    } = req.body;
+
+    const userId = req.user.userId;
+
+    // --------------------------------------------------
+    // 1. Validate authenticated user
+    // --------------------------------------------------
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Authentication required", false));
+    }
+
+    // --------------------------------------------------
+    // 2. Validate task ID
+    // --------------------------------------------------
+    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task ID", false));
+    }
+
+    // --------------------------------------------------
+    // 3. Basic input validation
+    // --------------------------------------------------
+    if (!title?.trim() || !description?.trim()) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Title and description are required",
+            false
+          )
+        );
+    }
+
+    if (assignedTo && !mongoose.Types.ObjectId.isValid(assignedTo)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid assigned user ID", false));
+    }
+
+    if (typeof estimatedHours !== "number" || estimatedHours < 0) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Estimated hours must be a non-negative number",
+            false
+          )
+        );
+    }
+
+    // --------------------------------------------------
+    // 4. Start transaction
+    // --------------------------------------------------
+    session.startTransaction();
+
+    // --------------------------------------------------
+    // 5. Find parent task
+    // --------------------------------------------------
+    const task = await Todo.findOne({
+      _id: taskId,
+      isDeleted: false,
+      isArchived: false,
+    })
+      .select("_id title createdBy participants")
+      .session(session)
+      .lean();
+
+    if (!task) {
+      await session.abortTransaction();
+
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    // --------------------------------------------------
+    // 6. Check parent task authorization
+    //
+    // Owner OR participant can create a subtask.
+    //
+    // If you want ONLY owner to create subtasks,
+    // change this authorization rule accordingly.
+    // --------------------------------------------------
+    const isOwner = task.createdBy?.toString() === userId.toString();
+
+    const isParticipant = task.participants?.some(
+      (participant) => participant.user?.toString() === userId.toString()
+    );
+
+    if (!isOwner && !isParticipant) {
+      await session.abortTransaction();
+
+      return res
+        .status(403)
+        .json(
+          new ApiResponse(
+            403,
+            null,
+            "You are not authorized to create a subtask for this task",
+            false
+          )
+        );
+    }
+
+    // --------------------------------------------------
+    // 7. Get actor information
+    // --------------------------------------------------
+    const actor = await User.findById(userId)
+      .select("_id name email profileImage")
+      .session(session)
+      .lean();
+
+    if (!actor) {
+      await session.abortTransaction();
+
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
+    }
+
+    const actorName = actor.name;
+
+    // --------------------------------------------------
+    // 8. Validate assigned user belongs to task
+    // --------------------------------------------------
+    if (assignedTo) {
+      const assignedUserIsMember =
+        task.createdBy?.toString() === assignedTo.toString() ||
+        task.participants?.some(
+          (participant) =>
+            participant.user?.toString() === assignedTo.toString()
+        );
+
+      if (!assignedUserIsMember) {
+        await session.abortTransaction();
+
+        return res
+          .status(400)
+          .json(
+            new ApiResponse(
+              400,
+              null,
+              "Assigned user must be a member of this task",
+              false
+            )
+          );
+      }
+    }
+
+    // --------------------------------------------------
+    // 9. Calculate next subtask order
+    // --------------------------------------------------
+    const lastSubTask = await SubTodo.findOne({
+      groupId: taskId,
+      isDeleted: false,
+    })
+      .sort({ order: -1 })
+      .select("order")
+      .session(session)
+      .lean();
+
+    const nextOrder =
+      typeof lastSubTask?.order === "number" ? lastSubTask.order + 1 : 0;
+
+    // --------------------------------------------------
+    // 10. Create subtask
+    // --------------------------------------------------
+    const [subTask] = await SubTodo.create(
+      [
+        {
+          title: title.trim(),
+          description: description.trim(),
+
+          order: nextOrder,
+
+          source,
+
+          assignedTo: assignedTo || null,
+
+          priority,
+          estimatedHours,
+
+          deadline: deadline || null,
+
+          tags: Array.isArray(tags) ? tags : [],
+
+          groupId: taskId,
+
+          status,
+
+          isArchived: false,
+          isDeleted: false,
+        },
+      ],
+      { session }
+    );
+
+    // --------------------------------------------------
+    // 11. Create activity
+    // --------------------------------------------------
+    const activity = await TaskActivity.create(
+      [
+        {
+          todo: taskId,
+
+          actor: userId,
+
+          actorName,
+
+          targetUser: assignedTo || null,
+
+          type: "SUBTASK_CREATED",
+
+          message: `${actorName} created subtask "${subTask.title}"`,
+
+          metadata: {
+            extra: {
+              subTaskId: subTask._id,
+              subTaskTitle: subTask.title,
+              assignedTo: assignedTo || null,
+              priority: subTask.priority,
+              deadline: subTask.deadline,
+            },
+          },
+        },
+      ],
+      { session }
+    );
+
+    // --------------------------------------------------
+    // 12. Get participant notification recipients
+    //
+    // Notify all participants EXCEPT creator/owner.
+    // --------------------------------------------------
+    const participantIds = [
+      ...(task.participants || []).map((participant) => participant.user),
+    ];
+
+    const recipientIds = [
+      ...new Set(
+        participantIds
+          .filter(Boolean)
+          .map((id) => id.toString())
+          .filter(
+            (id) =>
+              id !== userId.toString() && id !== task.createdBy?.toString()
+          )
+      ),
+    ];
+
+    // --------------------------------------------------
+    // 13. Create notifications
+    // --------------------------------------------------
+    let notifications = [];
+
+    if (recipientIds.length > 0) {
+      notifications = recipientIds.map((recipientId) => ({
+        user: recipientId,
+
+        sender: userId,
+
+        type: "SUBTASK_CREATED",
+
+        title: "New subtask created",
+
+        message: `${actorName} created a new subtask "${subTask.title}" in "${task.title}"`,
+
+        todo: taskId,
+
+        isRead: false,
+      }));
+
+      await Notification.insertMany(notifications, { session });
+    }
+
+    // --------------------------------------------------
+    // 14. Commit transaction
+    // --------------------------------------------------
+    await session.commitTransaction();
+
+    // --------------------------------------------------
+    // 15. Emit real-time notifications
+    //
+    // req.app.get("io") assumes Socket.IO instance
+    // has been registered on Express app.
+    // --------------------------------------------------
+    const io = req.app.get("io");
+
+    if (io && recipientIds.length > 0) {
+      recipientIds.forEach((recipientId) => {
+        io.to(`user:${recipientId}`).emit("notification", {
+          type: "SUBTASK_CREATED",
+
+          title: "New subtask created",
+
+          message: `${actorName} created a new subtask "${subTask.title}" in "${task.title}"`,
+
+          todo: taskId,
+
+          subTaskId: subTask._id,
+
+          sender: userId,
+
+          createdAt: new Date(),
+        });
+      });
+    }
+
+    // --------------------------------------------------
+    // 16. Return response
+    // --------------------------------------------------
+    return res.status(201).json(
+      new ApiResponse(
+        201,
+        {
+          subTask,
+          activity: activity[0],
+          notificationsSent: recipientIds.length,
+        },
+        "Subtask created successfully",
+        true
+      )
+    );
+  } catch (error) {
+    // --------------------------------------------------
+    // Rollback transaction if still active
+    // --------------------------------------------------
+    if (session.inTransaction()) {
+      await session.abortTransaction();
+    }
+
+    console.error("createSubTask error:", error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Failed to create subtask", false));
+  } finally {
+    await session.endSession();
+  }
+};
+
+const getSubTaskById = async (req, res) => {
+  try {
+    const { taskId, subTaskId } = req.params;
+
+    const userId = req.user.userId;
+
+    // --------------------------------------------------
+    // 1. Validate authentication
+    // --------------------------------------------------
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Authentication required", false));
+    }
+
+    // --------------------------------------------------
+    // 2. Validate IDs
+    // --------------------------------------------------
+    if (
+      !mongoose.Types.ObjectId.isValid(taskId) ||
+      !mongoose.Types.ObjectId.isValid(subTaskId)
+    ) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task or subtask ID", false));
+    }
+
+    // --------------------------------------------------
+    // 3. Find parent task
+    // --------------------------------------------------
+    const task = await Todo.findOne({
+      _id: taskId,
+      isDeleted: false,
+      isArchived: false,
+    })
+      .select("_id title createdBy participants")
+      .lean();
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    // --------------------------------------------------
+    // 4. Find subtask
+    // --------------------------------------------------
+    const subTask = await SubTodo.findOne({
+      _id: subTaskId,
+
+      // Important:
+      // groupId is the parent Todo reference
+      groupId: taskId,
+
+      isDeleted: false,
+      isArchived: false,
+    })
+      .populate({
+        path: "assignedTo",
+        select: "_id name email profileImage",
+      })
+      .lean();
+
+    if (!subTask) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Subtask not found", false));
+    }
+
+    // --------------------------------------------------
+    // 5. Authorization
+    //
+    // Owner OR assigned user can view subtask.
+    // --------------------------------------------------
+    const isOwner = task.createdBy?.toString() === userId.toString();
+
+    const isAssignedUser =
+      subTask.assignedTo?._id?.toString() === userId.toString();
+
+    if (!isOwner && !isAssignedUser) {
+      return res
+        .status(403)
+        .json(
+          new ApiResponse(
+            403,
+            null,
+            "You are not authorized to access this subtask",
+            false
+          )
+        );
+    }
+
+    // --------------------------------------------------
+    // 6. Response
+    // --------------------------------------------------
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          subTask,
+        },
+        "Subtask retrieved successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("getSubTaskById error:", error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Failed to retrieve subtask", false));
+  }
+};
+
 const updateSubTask = async (req, res) => {
   const session = await mongoose.startSession();
 
@@ -3111,4 +3590,6 @@ export {
   filterSubTasks,
   getSubTaskHistory,
   sortSubTasks,
+  createSubTask,
+  getSubTaskById,
 };

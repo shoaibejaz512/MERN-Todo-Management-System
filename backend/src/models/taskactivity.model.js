@@ -17,7 +17,7 @@ const taskActivitySchema = new mongoose.Schema(
       required: true,
       index: true,
     },
-    actorName:{
+    actorName: {
       type: String,
       required: true,
     },
@@ -58,6 +58,7 @@ const taskActivitySchema = new mongoose.Schema(
         "TASK_RESTORED",
         "TASK_COMMENT",
         "TASK_CLONE",
+        "SUBTASK_CREATED",
       ],
     },
 
