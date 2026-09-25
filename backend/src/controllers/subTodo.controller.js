@@ -2029,8 +2029,8 @@ const reorderSubTasks = async (req, res) => {
 
             actor: userId,
 
-            // Your schema uses "acotorName"
-            acotorName: actorName,
+            // Your schema uses "actorName"
+            actorName: actorName,
 
             type: "SUBTASK_REORDERED",
 
@@ -2565,7 +2565,197 @@ const filterSubTasks = async (req, res) => {
       );
   }
 };
-const getSubTaskHistory = async (req, res) => {};
+const getSubTaskHistory = async (req, res) => {
+  try {
+    const { taskId, subTaskId } = req.params;
+    const userId = req.user.userId;
+
+    // --------------------------------------------------
+    // 1. Validate authenticated user
+    // --------------------------------------------------
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Authentication required", false));
+    }
+
+    // --------------------------------------------------
+    // 2. Validate ObjectIds
+    // --------------------------------------------------
+    if (
+      !mongoose.Types.ObjectId.isValid(taskId) ||
+      !mongoose.Types.ObjectId.isValid(subTaskId)
+    ) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task or subtask ID", false));
+    }
+
+    // --------------------------------------------------
+    // 3. Find parent task
+    // --------------------------------------------------
+    const task = await Todo.findOne({
+      _id: taskId,
+      isDeleted: false,
+      isArchived: false,
+    })
+      .select("_id title createdBy")
+      .lean();
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    // --------------------------------------------------
+    // 4. Find subtask
+    // --------------------------------------------------
+    const subTask = await SubTodo.findOne({
+      _id: subTaskId,
+      todo: taskId,
+      isDeleted: false,
+      isArchived: false,
+    })
+      .select("_id title assignedTo")
+      .lean();
+
+    if (!subTask) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Subtask not found", false));
+    }
+
+    // --------------------------------------------------
+    // 5. Authorization
+    //
+    // Only:
+    // - Parent task owner
+    // - Assigned subtask user
+    //
+    // can view subtask history.
+    // --------------------------------------------------
+    const isOwner = task.createdBy?.toString() === userId.toString();
+
+    const isAssignedUser = subTask.assignedTo?.toString() === userId.toString();
+
+    if (!isOwner && !isAssignedUser) {
+      return res
+        .status(403)
+        .json(
+          new ApiResponse(
+            403,
+            null,
+            "You are not authorized to view this subtask history",
+            false
+          )
+        );
+    }
+
+    // --------------------------------------------------
+    // 6. Get subtask activities
+    //
+    // TaskActivity.todo = parent Todo ID
+    // metadata.subTaskId = specific SubTodo ID
+    // --------------------------------------------------
+    const activities = await TaskActivity.find({
+      todo: taskId,
+      "metadata.subTaskId": subTaskId,
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // --------------------------------------------------
+    // 7. No history
+    // --------------------------------------------------
+    if (activities.length === 0) {
+      return res
+        .status(200)
+        .json(new ApiResponse(200, [], "No subtask history found", true));
+    }
+
+    // --------------------------------------------------
+    // 8. Collect unique actor IDs
+    // --------------------------------------------------
+    const actorIds = [
+      ...new Set(
+        activities.map((activity) => activity.actor?.toString()).filter(Boolean)
+      ),
+    ];
+
+    // --------------------------------------------------
+    // 9. Fetch all actors in ONE query
+    // --------------------------------------------------
+    const users = await User.find({
+      _id: {
+        $in: actorIds,
+      },
+    })
+      .select("_id name email profileImage")
+      .lean();
+
+    // --------------------------------------------------
+    // 10. Create user lookup map
+    // --------------------------------------------------
+    const userMap = new Map(users.map((user) => [user._id.toString(), user]));
+
+    // --------------------------------------------------
+    // 11. Normalize history response
+    // --------------------------------------------------
+    const history = activities.map((activity) => {
+      const actor = activity.actor
+        ? userMap.get(activity.actor.toString())
+        : null;
+
+      return {
+        subTaskId: subTask._id,
+        subTaskTitle: subTask.title,
+
+        actor: activity.actor ?? null,
+        actorName: activity.actorName ?? null,
+
+        targetUser: activity.targetUser ?? null,
+
+        activityType: activity.type ?? null,
+
+        message: activity.message ?? null,
+
+        metadata: activity.metadata ?? null,
+
+        profileImage: actor?.profileImage ?? null,
+        email: actor?.email ?? null,
+
+        createdAt: activity.createdAt,
+        updatedAt: activity.updatedAt,
+      };
+    });
+
+    // --------------------------------------------------
+    // 12. Success response
+    // --------------------------------------------------
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          history,
+          "Subtask history retrieved successfully",
+          true
+        )
+      );
+  } catch (error) {
+    // --------------------------------------------------
+    // 13. Server-side error logging
+    // --------------------------------------------------
+    console.error("getSubTaskHistory error:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(500, null, "Failed to retrieve subtask history", false)
+      );
+  }
+};
 const sortSubTasks = async (req, res) => {};
 
 export {

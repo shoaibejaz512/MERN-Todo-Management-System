@@ -17,7 +17,7 @@ const taskActivitySchema = new mongoose.Schema(
       required: true,
       index: true,
     },
-    acotorName:{
+    actorName:{
       type: String,
       required: true,
     },
