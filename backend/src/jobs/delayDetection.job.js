@@ -2,33 +2,48 @@ import mongoose from "mongoose";
 import Todo from "../models/todo.model.js";
 import { analyzeTaskDelay } from "../services/todoDelayAnalysis.service.js";
 
-const runDelayDetection = async (taskId) => {
+const runDelayDetection = async (taskId, userId) => {
   if (!mongoose.Types.ObjectId.isValid(taskId)) {
     throw new Error("Invalid task ID");
   }
 
-  // =====================================================
-  // 1. FIND SPECIFIC OVERDUE TASK
-  // =====================================================
-
   const task = await Todo.findOne({
     _id: taskId,
-    deadline: { $lt: new Date() },
-    status: { $ne: "COMPLETED" },
     isDeleted: false,
     isArchived: false,
-  }).lean();
+  })
+    .select("_id deadline status createdBy participants")
+    .lean();
 
   if (!task) {
-    return {
-      delayed: false,
-      message: "Task is not overdue or does not exist",
-    };
+    throw new Error("Task not found");
   }
 
-  // =====================================================
-  // 2. SEND TASK TO DELAY SERVICE
-  // =====================================================
+  const isOwner = task.participants?.some(
+    (participant) =>
+      participant.user?.toString() === userId.toString() &&
+      participant.role === "owner"
+  );
+
+  if (!isOwner) {
+    const error = new Error("Only the task owner can view delay analysis");
+
+    error.statusCode = 403;
+
+    throw error;
+  }
+
+  if (
+    !task.deadline ||
+    new Date(task.deadline) >= new Date() ||
+    task.status === "COMPLETED"
+  ) {
+    return {
+      delayed: false,
+      taskId: task._id,
+      message: "Task is not currently delayed",
+    };
+  }
 
   const analysis = await analyzeTaskDelay(task._id);
 

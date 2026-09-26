@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import { Todo } from "../models/todo.model.js";
 import { SubTodo } from "../models/subTodo.model.js";
 import { TaskActivity } from "../models/taskactivity.model.js";
+
 import { analyzeDelayWithGroq } from "../service/groqService.js";
 
 const analyzeTaskDelay = async (taskId) => {
@@ -26,7 +27,7 @@ const analyzeTaskDelay = async (taskId) => {
     isArchived: false,
   })
     .select(
-      "title description priority estimatedHours deadline tags status createdBy participants SubTodos"
+      "title description priority estimatedHours deadline tags status createdBy participants SubTodos delayAnalysis"
     )
     .populate("participants.user", "name email profileImage")
     .lean();
@@ -36,21 +37,35 @@ const analyzeTaskDelay = async (taskId) => {
   }
 
   // =====================================================
-  // 3. CHECK PARENT TASK DEADLINE
+  // 3. CHECK CURRENT TASK DELAY STATUS
   // =====================================================
 
   const isOverdue = task.deadline && new Date(task.deadline) < now;
 
-  if (!isOverdue) {
+  if (!isOverdue || task.status === "COMPLETED") {
     return {
       delayed: false,
       taskId: task._id,
       message: "Task is not overdue",
+      cached: false,
     };
   }
 
   // =====================================================
-  // 4. FIND SUBTASKS
+  // 4. CHECK CACHED AI ANALYSIS
+  // =====================================================
+
+  if (task.delayAnalysis?.analyzedAt && task.delayAnalysis?.delayed === true) {
+    return {
+      delayed: true,
+      taskId: task._id,
+      analysis: task.delayAnalysis,
+      cached: true,
+    };
+  }
+
+  // =====================================================
+  // 5. FIND SUBTASKS
   // =====================================================
 
   const subTaskIds = task.SubTodos || [];
@@ -67,7 +82,7 @@ const analyzeTaskDelay = async (taskId) => {
     .lean();
 
   // =====================================================
-  // 5. CALCULATE SUBTASK PROGRESS
+  // 6. CALCULATE SUBTASK PROGRESS
   // =====================================================
 
   const totalSubTasks = subTasks.length;
@@ -85,20 +100,15 @@ const analyzeTaskDelay = async (taskId) => {
   );
 
   // =====================================================
-  // 6. BUILD SUBTASK CONTEXT
+  // 7. BUILD SUBTASK CONTEXT
   // =====================================================
 
   const subTaskContext = subTasks.map((subTask) => ({
     id: subTask._id,
-
     title: subTask.title,
-
     status: subTask.status,
-
     priority: subTask.priority,
-
     deadline: subTask.deadline,
-
     estimatedHours: subTask.estimatedHours,
 
     assignedTo: subTask.assignedTo
@@ -118,7 +128,7 @@ const analyzeTaskDelay = async (taskId) => {
   }));
 
   // =====================================================
-  // 7. FIND TASK ACTIVITIES
+  // 8. FIND TASK ACTIVITIES
   // =====================================================
 
   const activities = await TaskActivity.find({
@@ -131,7 +141,7 @@ const analyzeTaskDelay = async (taskId) => {
     .lean();
 
   // =====================================================
-  // 8. BUILD ACTIVITY CONTEXT
+  // 9. BUILD ACTIVITY CONTEXT
   // =====================================================
 
   const activityContext = activities.map((activity) => ({
@@ -151,7 +161,7 @@ const analyzeTaskDelay = async (taskId) => {
   }));
 
   // =====================================================
-  // 9. BUILD PARTICIPANT CONTEXT
+  // 10. BUILD PARTICIPANT CONTEXT
   // =====================================================
 
   const participantContext = (task.participants || []).map((participant) => ({
@@ -165,25 +175,18 @@ const analyzeTaskDelay = async (taskId) => {
   }));
 
   // =====================================================
-  // 10. BUILD AI CONTEXT
+  // 11. BUILD AI CONTEXT
   // =====================================================
 
   const delayContext = {
     task: {
       id: task._id,
-
       title: task.title,
-
       description: task.description,
-
       priority: task.priority,
-
       estimatedHours: task.estimatedHours,
-
       deadline: task.deadline,
-
       status: task.status,
-
       isOverdue: true,
     },
 
@@ -210,21 +213,87 @@ const analyzeTaskDelay = async (taskId) => {
   };
 
   // =====================================================
-  // 11. SEND CONTEXT TO GROQ
+  // 12. SEND CONTEXT TO GROQ
   // =====================================================
 
   const analysis = await analyzeDelayWithGroq(delayContext);
 
   // =====================================================
-  // 12. RETURN FINAL RESULT
+  // 13. NORMALIZE AI RESPONSE
+  // =====================================================
+
+  const normalizedAnalysis = {
+    delayed: Boolean(analysis.delayed),
+
+    summary:
+      typeof analysis.summary === "string" ? analysis.summary.trim() : "",
+
+    reasons: Array.isArray(analysis.reasons)
+      ? analysis.reasons
+          .filter(
+            (reason) =>
+              reason &&
+              typeof reason.type === "string" &&
+              typeof reason.description === "string"
+          )
+          .map((reason) => ({
+            type: reason.type.trim(),
+            description: reason.description.trim(),
+          }))
+      : [],
+
+    affectedSubtasks: Array.isArray(analysis.affectedSubtasks)
+      ? analysis.affectedSubtasks
+          .filter(
+            (subTask) =>
+              subTask && subTask.id && typeof subTask.title === "string"
+          )
+          .map((subTask) => ({
+            id: subTask.id,
+            title: subTask.title.trim(),
+          }))
+      : [],
+  };
+
+  // =====================================================
+  // 14. SAVE AI ANALYSIS TO TODO
+  // =====================================================
+
+  await Todo.findByIdAndUpdate(
+    taskId,
+    {
+      $set: {
+        delayAnalysis: {
+          analyzedAt: new Date(),
+
+          delayed: normalizedAnalysis.delayed,
+
+          summary: normalizedAnalysis.summary,
+
+          reasons: normalizedAnalysis.reasons,
+
+          affectedSubtasks: normalizedAnalysis.affectedSubtasks,
+        },
+      },
+    },
+    {
+      new: false,
+      runValidators: true,
+    }
+  );
+
+  // =====================================================
+  // 15. RETURN FINAL RESULT
   // =====================================================
 
   return {
-    delayed: true,
+    delayed: normalizedAnalysis.delayed,
 
     taskId: task._id,
 
-    analysis,
+    analysis: normalizedAnalysis,
+
+    cached: false,
   };
 };
 

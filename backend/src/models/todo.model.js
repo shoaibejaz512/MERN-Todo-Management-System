@@ -50,7 +50,10 @@ const todoSchema = new mongoose.Schema(
       default: [],
     },
 
-    // Group specific fields
+    // =====================================================
+    // GROUP TODO
+    // =====================================================
+
     SubTodos: [
       {
         type: mongoose.Schema.Types.ObjectId,
@@ -71,11 +74,13 @@ const todoSchema = new mongoose.Schema(
           ref: "User",
           required: true,
         },
+
         role: {
           type: String,
           enum: ["viewer", "contributor", "editor", "owner"],
           default: "owner",
         },
+
         addedAt: {
           type: Date,
           default: Date.now,
@@ -93,6 +98,64 @@ const todoSchema = new mongoose.Schema(
       default: "START",
     },
 
+    // =====================================================
+    // AI DELAY ANALYSIS
+    // =====================================================
+
+    delayAnalysis: {
+      analyzedAt: {
+        type: Date,
+        default: null,
+      },
+
+      delayed: {
+        type: Boolean,
+        default: false,
+      },
+
+      summary: {
+        type: String,
+        default: null,
+        trim: true,
+      },
+
+      reasons: [
+        {
+          type: {
+            type: String,
+            trim: true,
+          },
+
+          description: {
+            type: String,
+            trim: true,
+          },
+
+          _id: false,
+        },
+      ],
+
+      affectedSubtasks: [
+        {
+          id: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "SubTodo",
+          },
+
+          title: {
+            type: String,
+            trim: true,
+          },
+
+          _id: false,
+        },
+      ],
+    },
+
+    // =====================================================
+    // ARCHIVE / DELETE
+    // =====================================================
+
     isArchived: {
       type: Boolean,
       default: false,
@@ -102,20 +165,24 @@ const todoSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+
     comments: [
       {
         type: mongoose.Schema.Types.ObjectId,
         ref: "Comment",
       },
     ],
+
     deletedAt: {
       type: Date,
       default: null,
     },
+
     archivedAt: {
       type: Date,
       default: null,
     },
+
     taskInvitations: [
       {
         type: mongoose.Schema.Types.ObjectId,
@@ -128,11 +195,26 @@ const todoSchema = new mongoose.Schema(
   }
 );
 
-// Indexes
+// =====================================================
+// INDEXES
+// =====================================================
+
 todoSchema.index({ createdBy: 1 });
+
 todoSchema.index({ "participants.user": 1 });
+
 todoSchema.index({ status: 1 });
+
 todoSchema.index({ isArchived: 1 });
+
 todoSchema.index({ isDeleted: 1 });
+
+// Useful for overdue/delay detection
+todoSchema.index({
+  deadline: 1,
+  status: 1,
+  isDeleted: 1,
+  isArchived: 1,
+});
 
 export const Todo = mongoose.model("Todo", todoSchema);
