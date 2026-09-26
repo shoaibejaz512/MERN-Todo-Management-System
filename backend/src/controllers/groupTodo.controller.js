@@ -3661,9 +3661,176 @@ const deleteCommentGroupTask = async (req, res) => {
     await session.endSession();
   }
 };
-const getGroupTaskProgress = async (req, res) => {};
+const getGroupTaskProgress = async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const userId = req.user.userId;
 
+    // Validate task ID
+    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task ID", false));
+    }
 
+    // Find active group task
+    const task = await Todo.findOne({
+      _id: taskId,
+      isDeleted: false,
+      isArchived: false,
+      participants: {
+        $elemMatch: {
+          user: userId,
+        },
+      },
+    })
+      .select(
+        "title status deadline participants SubTodos createdBy"
+      )
+      .lean();
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(
+          new ApiResponse(
+            404,
+            null,
+            "Group task not found or you don't have access",
+            false
+          )
+        );
+    }
+
+    // Make sure this is a collaborative/group task
+    if (!task.participants || task.participants.length <= 1) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Progress is only available for group tasks",
+            false
+          )
+        );
+    }
+
+    const subTasks = task.SubTodos || [];
+
+    // Only active subtasks
+    const activeSubTasks = subTasks.filter(
+      (subTask) => !subTask.isDeleted
+    );
+
+    const totalSubTasks = activeSubTasks.length;
+
+    // Status counts
+    const completedSubTasks = activeSubTasks.filter(
+      (subTask) => subTask.status === "COMPLETED"
+    ).length;
+
+    const ongoingSubTasks = activeSubTasks.filter(
+      (subTask) => subTask.status === "ON_GOING"
+    ).length;
+
+    const pendingSubTasks = activeSubTasks.filter(
+      (subTask) => subTask.status === "PENDING"
+    ).length;
+
+    const incompleteSubTasks = activeSubTasks.filter(
+      (subTask) => subTask.status === "IN_COMPLETE"
+    ).length;
+
+    // Overdue subtasks
+    const now = new Date();
+
+    const overdueSubTasks = activeSubTasks.filter(
+      (subTask) =>
+        subTask.deadline &&
+        new Date(subTask.deadline) < now &&
+        subTask.status !== "COMPLETED"
+    ).length;
+
+    // Assigned / unassigned subtasks
+    const assignedSubTasks = activeSubTasks.filter(
+      (subTask) => subTask.assignedTo
+    ).length;
+
+    const unassignedSubTasks =
+      totalSubTasks - assignedSubTasks;
+
+    // Overall progress percentage
+    const progressPercentage =
+      totalSubTasks === 0
+        ? 0
+        : Math.round(
+            (completedSubTasks / totalSubTasks) * 100
+          );
+
+    // Remaining subtasks
+    const remainingSubTasks =
+      totalSubTasks - completedSubTasks;
+
+    // Check whether parent task is overdue
+    const isOverdue =
+      task.deadline &&
+      new Date(task.deadline) < now &&
+      task.status !== "COMPLETED";
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          task: {
+            id: task._id,
+            title: task.title,
+            status: task.status,
+            deadline: task.deadline,
+            isOverdue: Boolean(isOverdue),
+          },
+
+          participants: {
+            total: task.participants.length,
+          },
+
+          progress: {
+            percentage: progressPercentage,
+            totalSubTasks,
+            completedSubTasks,
+            remainingSubTasks,
+
+            statusBreakdown: {
+              pending: pendingSubTasks,
+              ongoing: ongoingSubTasks,
+              incomplete: incompleteSubTasks,
+              completed: completedSubTasks,
+            },
+
+            overdueSubTasks,
+            assignedSubTasks,
+            unassignedSubTasks,
+          },
+        },
+        "Group task progress fetched successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("getGroupTaskProgress error:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          "Failed to fetch group task progress",
+          false
+        )
+      );
+  }
+};
 export {
   createGroupTodo,
   updateGroupTodo,
