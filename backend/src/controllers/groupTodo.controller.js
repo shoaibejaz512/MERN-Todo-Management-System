@@ -3831,6 +3831,1036 @@ const getGroupTaskProgress = async (req, res) => {
       );
   }
 };
+const getGroupTaskHistory = async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const {
+      page = 1,
+      limit = 20,
+      activityType,
+      subTaskId,
+    } = req.query;
+
+    const userId = req.user.userId;
+
+    // --------------------------------------------------
+    // 1. Validate IDs
+    // --------------------------------------------------
+
+    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Invalid task ID",
+            false
+          )
+        );
+    }
+
+    if (
+      subTaskId &&
+      !mongoose.Types.ObjectId.isValid(subTaskId)
+    ) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Invalid subtask ID",
+            false
+          )
+        );
+    }
+
+    // --------------------------------------------------
+    // 2. Pagination
+    // --------------------------------------------------
+
+    const pageNumber = Math.max(Number(page), 1);
+    const limitNumber = Math.min(
+      Math.max(Number(limit), 1),
+      100
+    );
+
+    const skip = (pageNumber - 1) * limitNumber;
+
+    // --------------------------------------------------
+    // 3. Get Group Task
+    // --------------------------------------------------
+
+    const task = await Todo.findOne({
+      _id: taskId,
+      isDeleted: false,
+      isArchived: false,
+      participants: {
+        $elemMatch: {
+          user: userId,
+        },
+      },
+    })
+      .select(
+        "title status deadline createdBy participants SubTodos createdAt updatedAt"
+      )
+      .populate({
+        path: "participants.user",
+        select: "name email profileImage",
+      })
+      .lean();
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(
+          new ApiResponse(
+            404,
+            null,
+            "Group task not found or you don't have access",
+            false
+          )
+        );
+    }
+
+    // --------------------------------------------------
+    // 4. Make sure it is a Group Task
+    // --------------------------------------------------
+
+    if (!task.participants || task.participants.length <= 1) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "History is only available for group tasks",
+            false
+          )
+        );
+    }
+
+    // --------------------------------------------------
+    // 5. Validate requested subtask belongs to task
+    // --------------------------------------------------
+
+    if (subTaskId) {
+      const subTaskExists = (task.SubTodos || []).some(
+        (subTask) =>
+          String(subTask._id) === String(subTaskId) &&
+          !subTask.isDeleted
+      );
+
+      if (!subTaskExists) {
+        return res
+          .status(404)
+          .json(
+            new ApiResponse(
+              404,
+              null,
+              "Subtask not found in this group task",
+              false
+            )
+          );
+      }
+    }
+
+    // --------------------------------------------------
+    // 6. Build Activity Query
+    // --------------------------------------------------
+
+    const activityQuery = {
+      todo: taskId,
+    };
+
+    if (activityType) {
+      activityQuery.type = activityType;
+    }
+
+    /*
+     * If your TaskActivity schema stores subtask reference
+     * using `subTodo`, use this filter.
+     *
+     * Remove/rename it if your actual schema uses another field.
+     */
+    if (subTaskId) {
+      activityQuery.subTodo = subTaskId;
+    }
+
+    // --------------------------------------------------
+    // 7. Fetch Activities
+    // --------------------------------------------------
+
+    const [
+      activities,
+      totalActivities,
+    ] = await Promise.all([
+      TaskActivity.find(activityQuery)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limitNumber)
+        .populate({
+          path: "actor",
+          select: "name email profileImage",
+        })
+        .populate({
+          path: "targetUser",
+          select: "name email profileImage",
+        })
+        .lean(),
+
+      TaskActivity.countDocuments(activityQuery),
+    ]);
+
+    // --------------------------------------------------
+    // 8. Subtask Summary
+    // --------------------------------------------------
+
+    const activeSubTasks = (task.SubTodos || []).filter(
+      (subTask) => !subTask.isDeleted
+    );
+
+    const totalSubTasks = activeSubTasks.length;
+
+    const completedSubTasks = activeSubTasks.filter(
+      (subTask) => subTask.status === "COMPLETED"
+    ).length;
+
+    const ongoingSubTasks = activeSubTasks.filter(
+      (subTask) => subTask.status === "ON_GOING"
+    ).length;
+
+    const pendingSubTasks = activeSubTasks.filter(
+      (subTask) => subTask.status === "PENDING"
+    ).length;
+
+    const incompleteSubTasks = activeSubTasks.filter(
+      (subTask) => subTask.status === "IN_COMPLETE"
+    ).length;
+
+    const now = new Date();
+
+    const overdueSubTasks = activeSubTasks.filter(
+      (subTask) =>
+        subTask.deadline &&
+        new Date(subTask.deadline) < now &&
+        subTask.status !== "COMPLETED"
+    ).length;
+
+    const progressPercentage =
+      totalSubTasks === 0
+        ? 0
+        : Math.round(
+            (completedSubTasks / totalSubTasks) * 100
+          );
+
+    // --------------------------------------------------
+    // 9. Participant Summary
+    // --------------------------------------------------
+
+    const participants = (task.participants || []).map(
+      (participant) => ({
+        user: participant.user?._id,
+        name: participant.user?.name || "Unknown User",
+        email: participant.user?.email || null,
+        profileImage:
+          participant.user?.profileImage || null,
+        role: participant.role,
+      })
+    );
+
+    // --------------------------------------------------
+    // 10. Format Activity History
+    // --------------------------------------------------
+
+    const history = activities.map((activity) => ({
+      id: activity._id,
+
+      type: activity.type,
+
+      /*
+       * Keep your existing activity message if available.
+       */
+      message:
+        activity.message ||
+        activity.description ||
+        null,
+
+      actor: activity.actor
+        ? {
+            id: activity.actor._id,
+            name: activity.actor.name,
+            email: activity.actor.email,
+            profileImage:
+              activity.actor.profileImage || null,
+          }
+        : {
+            id: null,
+            name: activity.acotorName || "Unknown User",
+            email: null,
+            profileImage: null,
+          },
+
+      targetUser: activity.targetUser
+        ? {
+            id: activity.targetUser._id,
+            name: activity.targetUser.name,
+            email: activity.targetUser.email,
+            profileImage:
+              activity.targetUser.profileImage || null,
+          }
+        : null,
+
+      subTask: activity.subTodo
+        ? {
+            id: activity.subTodo,
+          }
+        : null,
+
+      createdAt: activity.createdAt,
+      updatedAt: activity.updatedAt,
+    }));
+
+    // --------------------------------------------------
+    // 11. Pagination Metadata
+    // --------------------------------------------------
+
+    const totalPages = Math.ceil(
+      totalActivities / limitNumber
+    );
+
+    // --------------------------------------------------
+    // 12. Final Response
+    // --------------------------------------------------
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          task: {
+            id: task._id,
+            title: task.title,
+            status: task.status,
+            deadline: task.deadline,
+            createdAt: task.createdAt,
+            updatedAt: task.updatedAt,
+          },
+
+          participants: {
+            total: participants.length,
+            members: participants,
+          },
+
+          progress: {
+            percentage: progressPercentage,
+
+            subTasks: {
+              total: totalSubTasks,
+              completed: completedSubTasks,
+              ongoing: ongoingSubTasks,
+              pending: pendingSubTasks,
+              incomplete: incompleteSubTasks,
+              overdue: overdueSubTasks,
+            },
+          },
+
+          history,
+
+          pagination: {
+            currentPage: pageNumber,
+            limit: limitNumber,
+            totalItems: totalActivities,
+            totalPages,
+            hasNextPage:
+              pageNumber < totalPages,
+            hasPreviousPage:
+              pageNumber > 1,
+          },
+        },
+        "Group task history fetched successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error(
+      "getGroupTaskHistory error:",
+      error
+    );
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          "Failed to fetch group task history",
+          false
+        )
+      );
+  }
+};
+
+const reorderGroupTasks = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { taskOrders } = req.body;
+    const userId = req.user.userId;
+
+    if (!Array.isArray(taskOrders) || !taskOrders.length) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "taskOrders must be a non-empty array",
+            false
+          )
+        );
+    }
+
+    const taskIds = taskOrders.map((item) => item.taskId);
+
+    // Validate IDs
+    const hasInvalidId = taskIds.some(
+      (id) => !mongoose.Types.ObjectId.isValid(id)
+    );
+
+    if (hasInvalidId) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "One or more invalid task IDs", false)
+        );
+    }
+
+    // Prevent duplicate task IDs
+    if (new Set(taskIds.map(String)).size !== taskIds.length) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Duplicate task IDs are not allowed",
+            false
+          )
+        );
+    }
+
+    await session.withTransaction(async () => {
+      const tasks = await Todo.find({
+        _id: { $in: taskIds },
+        isDeleted: false,
+        isArchived: false,
+        participants: {
+          $elemMatch: {
+            user: userId,
+            role: { $in: ["owner", "editor"] },
+          },
+        },
+      })
+        .select("_id title")
+        .session(session);
+
+      if (tasks.length !== taskIds.length) {
+        throw new Error(
+          "One or more group tasks were not found or you don't have permission"
+        );
+      }
+
+      const operations = taskOrders.map(({ taskId, order }) => ({
+        updateOne: {
+          filter: {
+            _id: taskId,
+            isDeleted: false,
+            isArchived: false,
+          },
+          update: {
+            $set: {
+              order,
+            },
+          },
+        },
+      }));
+
+      await Todo.bulkWrite(operations, { session });
+
+      // Activity for each reordered task
+      const activities = taskOrders.map(({ taskId, order }) => ({
+        todo: taskId,
+        actor: userId,
+        type: "TASK_UPDATED",
+        acotorName: req.user.name || "Group Member",
+        message: "Updated group task order",
+        metadata: {
+          order,
+        },
+      }));
+
+      await TaskActivity.insertMany(activities, {
+        session,
+      });
+    });
+
+    // Emit after successful transaction
+    for (const { taskId, order } of taskOrders) {
+      io.to(`task:${taskId}`).emit("task:updated", {
+        taskId,
+        type: "TASK_REORDERED",
+        order,
+        updatedBy: userId,
+      });
+    }
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          updatedTasks: taskOrders.length,
+        },
+        "Group tasks reordered successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("reorderGroupTasks:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          error.message || "Failed to reorder group tasks",
+          false
+        )
+      );
+  } finally {
+    await session.endSession();
+  }
+};
+
+const searchGroupTasks = async (req, res) => {
+  try {
+    const {
+      q,
+      page = 1,
+      limit = 20,
+      sortBy = "createdAt",
+      sortOrder = "desc",
+    } = req.query;
+
+    const userId = req.user.userId;
+
+    if (!q?.trim()) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Search query is required", false));
+    }
+
+    const pageNumber = Math.max(Number(page) || 1, 1);
+
+    const limitNumber = Math.min(Math.max(Number(limit) || 20, 1), 100);
+
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const allowedSortFields = [
+      "createdAt",
+      "updatedAt",
+      "deadline",
+      "priority",
+      "estimatedHours",
+      "order",
+    ];
+
+    const safeSortBy = allowedSortFields.includes(sortBy)
+      ? sortBy
+      : "createdAt";
+
+    const sortDirection = sortOrder === "asc" ? 1 : -1;
+
+    // Escape regex
+    const escapedQuery = q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    const query = {
+      isDeleted: false,
+      isArchived: false,
+
+      // User must be a participant
+      participants: {
+        $elemMatch: {
+          user: userId,
+        },
+      },
+
+      // Group task
+      $expr: {
+        $gt: [{ $size: "$participants" }, 1],
+      },
+
+      $or: [
+        {
+          title: {
+            $regex: escapedQuery,
+            $options: "i",
+          },
+        },
+        {
+          description: {
+            $regex: escapedQuery,
+            $options: "i",
+          },
+        },
+        {
+          tags: {
+            $regex: escapedQuery,
+            $options: "i",
+          },
+        },
+      ],
+    };
+
+    const [tasks, totalItems] = await Promise.all([
+      Todo.find(query)
+        .select(
+          "title description priority status deadline tags estimatedHours participants createdBy createdAt updatedAt order"
+        )
+        .populate({
+          path: "participants.user",
+          select: "name profileImage",
+        })
+        .sort({
+          [safeSortBy]: sortDirection,
+        })
+        .skip(skip)
+        .limit(limitNumber)
+        .lean(),
+
+      Todo.countDocuments(query),
+    ]);
+
+    const totalPages = Math.ceil(totalItems / limitNumber);
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          query: q.trim(),
+          tasks,
+          pagination: {
+            currentPage: pageNumber,
+            limit: limitNumber,
+            totalItems,
+            totalPages,
+            hasNextPage: pageNumber < totalPages,
+            hasPreviousPage: pageNumber > 1,
+          },
+        },
+        "Group tasks searched successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("searchGroupTasks:", error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Failed to search group tasks", false));
+  }
+};
+
+
+const filterGroupTasks = async (req, res) => {
+  try {
+    const {
+      status,
+      priority,
+      overdue,
+      from,
+      to,
+      page = 1,
+      limit = 20,
+      sortBy = "createdAt",
+      sortOrder = "desc",
+    } = req.query;
+
+    const userId = req.user.userId;
+
+    const pageNumber = Math.max(Number(page) || 1, 1);
+
+    const limitNumber = Math.min(Math.max(Number(limit) || 20, 1), 100);
+
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const query = {
+      isDeleted: false,
+      isArchived: false,
+
+      participants: {
+        $elemMatch: {
+          user: userId,
+        },
+      },
+
+      $expr: {
+        $gt: [{ $size: "$participants" }, 1],
+      },
+    };
+
+    // Status
+    if (status) {
+      const statuses = status.split(",").map((item) => item.trim());
+
+      query.status = {
+        $in: statuses,
+      };
+    }
+
+    // Priority
+    if (priority) {
+      const priorities = priority.split(",").map((item) => item.trim());
+
+      query.priority = {
+        $in: priorities,
+      };
+    }
+
+    // Overdue
+    if (overdue === "true") {
+      query.deadline = {
+        $lt: new Date(),
+      };
+
+      query.status = {
+        ...(query.status || {}),
+        $ne: "COMPLETED",
+      };
+    }
+
+    if (overdue === "false") {
+      query.$or = [
+        {
+          deadline: {
+            $gte: new Date(),
+          },
+        },
+        {
+          deadline: null,
+        },
+        {
+          status: "COMPLETED",
+        },
+      ];
+    }
+
+    // Deadline range
+    if (from || to) {
+      query.deadline = {};
+
+      if (from) {
+        const fromDate = new Date(from);
+
+        if (Number.isNaN(fromDate.getTime())) {
+          return res
+            .status(400)
+            .json(new ApiResponse(400, null, "Invalid from date", false));
+        }
+
+        query.deadline.$gte = fromDate;
+      }
+
+      if (to) {
+        const toDate = new Date(to);
+
+        if (Number.isNaN(toDate.getTime())) {
+          return res
+            .status(400)
+            .json(new ApiResponse(400, null, "Invalid to date", false));
+        }
+
+        query.deadline.$lte = toDate;
+      }
+    }
+
+    const allowedSortFields = [
+      "createdAt",
+      "updatedAt",
+      "deadline",
+      "priority",
+      "estimatedHours",
+      "order",
+      "title",
+    ];
+
+    const safeSortBy = allowedSortFields.includes(sortBy)
+      ? sortBy
+      : "createdAt";
+
+    const direction = sortOrder === "asc" ? 1 : -1;
+
+    const [tasks, totalItems] = await Promise.all([
+      Todo.find(query)
+        .select(
+          "title description priority status deadline tags estimatedHours participants createdBy createdAt updatedAt order"
+        )
+        .populate({
+          path: "participants.user",
+          select: "name profileImage",
+        })
+        .sort({
+          [safeSortBy]: direction,
+        })
+        .skip(skip)
+        .limit(limitNumber)
+        .lean(),
+
+      Todo.countDocuments(query),
+    ]);
+
+    const totalPages = Math.ceil(totalItems / limitNumber);
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          filters: {
+            status: status || null,
+            priority: priority || null,
+            overdue: overdue || null,
+            from: from || null,
+            to: to || null,
+          },
+
+          tasks,
+
+          pagination: {
+            currentPage: pageNumber,
+            limit: limitNumber,
+            totalItems,
+            totalPages,
+            hasNextPage: pageNumber < totalPages,
+            hasPreviousPage: pageNumber > 1,
+          },
+        },
+        "Group tasks filtered successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("filterGroupTasks:", error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Failed to filter group tasks", false));
+  }
+};
+
+const getOverdueGroupTasks = async (req, res) => {
+  try {
+    const { page = 1, limit = 20 } = req.query;
+
+    const userId = req.user.userId;
+
+    const pageNumber = Math.max(Number(page) || 1, 1);
+
+    const limitNumber = Math.min(Math.max(Number(limit) || 20, 1), 100);
+
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const now = new Date();
+
+    const query = {
+      isDeleted: false,
+      isArchived: false,
+
+      deadline: {
+        $lt: now,
+      },
+
+      status: {
+        $ne: "COMPLETED",
+      },
+
+      participants: {
+        $elemMatch: {
+          user: userId,
+        },
+      },
+
+      $expr: {
+        $gt: [{ $size: "$participants" }, 1],
+      },
+    };
+
+    const [tasks, totalItems] = await Promise.all([
+      Todo.find(query)
+        .select(
+          "title description priority status deadline tags estimatedHours participants createdBy createdAt updatedAt"
+        )
+        .populate({
+          path: "participants.user",
+          select: "name profileImage",
+        })
+        .sort({
+          deadline: 1,
+        })
+        .skip(skip)
+        .limit(limitNumber)
+        .lean(),
+
+      Todo.countDocuments(query),
+    ]);
+
+    const totalPages = Math.ceil(totalItems / limitNumber);
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          overdueTasks: tasks,
+          totalOverdue: totalItems,
+
+          pagination: {
+            currentPage: pageNumber,
+            limit: limitNumber,
+            totalItems,
+            totalPages,
+            hasNextPage: pageNumber < totalPages,
+            hasPreviousPage: pageNumber > 1,
+          },
+        },
+        "Overdue group tasks fetched successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("getOverdueGroupTasks:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(500, null, "Failed to fetch overdue group tasks", false)
+      );
+  }
+};
+
+const sortGroupTasks = async (req, res) => {
+  try {
+    const {
+      sortBy = "createdAt",
+      sortOrder = "desc",
+      page = 1,
+      limit = 20,
+    } = req.query;
+
+    const userId = req.user.userId;
+
+    const allowedSortFields = [
+      "createdAt",
+      "updatedAt",
+      "deadline",
+      "priority",
+      "estimatedHours",
+      "status",
+      "title",
+      "order",
+    ];
+
+    if (!allowedSortFields.includes(sortBy)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            `Invalid sort field. Allowed fields: ${allowedSortFields.join(
+              ", "
+            )}`,
+            false
+          )
+        );
+    }
+
+    const direction = sortOrder === "asc" ? 1 : -1;
+
+    const pageNumber = Math.max(Number(page) || 1, 1);
+
+    const limitNumber = Math.min(Math.max(Number(limit) || 20, 1), 100);
+
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const query = {
+      isDeleted: false,
+      isArchived: false,
+
+      participants: {
+        $elemMatch: {
+          user: userId,
+        },
+      },
+
+      $expr: {
+        $gt: [{ $size: "$participants" }, 1],
+      },
+    };
+
+    const [tasks, totalItems] = await Promise.all([
+      Todo.find(query)
+        .select(
+          "title description priority status deadline tags estimatedHours participants createdBy createdAt updatedAt order"
+        )
+        .populate({
+          path: "participants.user",
+          select: "name profileImage",
+        })
+        .sort({
+          [sortBy]: direction,
+        })
+        .skip(skip)
+        .limit(limitNumber)
+        .lean(),
+
+      Todo.countDocuments(query),
+    ]);
+
+    const totalPages = Math.ceil(totalItems / limitNumber);
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          sorting: {
+            sortBy,
+            sortOrder,
+          },
+
+          tasks,
+
+          pagination: {
+            currentPage: pageNumber,
+            limit: limitNumber,
+            totalItems,
+            totalPages,
+            hasNextPage: pageNumber < totalPages,
+            hasPreviousPage: pageNumber > 1,
+          },
+        },
+        "Group tasks sorted successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("sortGroupTasks:", error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Failed to sort group tasks", false));
+  }
+};
+
 export {
   createGroupTodo,
   updateGroupTodo,
@@ -3857,4 +4887,11 @@ export {
   updateCommentsGroupTasks,
   getPendingTaskInvitations,
   deleteCommentGroupTask,
-};
+  getGroupTaskProgress,
+  getGroupTaskHistory,
+  reorderGroupTasks,
+  searchGroupTasks,
+  filterGroupTasks,
+  getOverdueGroupTasks,
+  sortGroupTasks,
+};  

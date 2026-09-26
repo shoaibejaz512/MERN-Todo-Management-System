@@ -5309,3 +5309,11 @@ export const deleteCommentTask = async (req, res) => {
 };
 
 export const getSingleTaskProgress = async (req, res) => {};
+
+// getGroupTaskProgress,
+//   getGroupTaskHistory,
+//   reorderGroupTasks,
+//   searchGroupTasks,
+//   filterGroupTasks,
+//   getOverdueGroupTasks,
+//   sortGroupTasks,
