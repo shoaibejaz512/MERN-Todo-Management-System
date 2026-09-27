@@ -5007,14 +5007,7 @@ export const deleteCommentTask = async (req, res) => {
     ) {
       return res
         .status(400)
-        .json(
-          new ApiResponse(
-            400,
-            null,
-            "Invalid task or comment ID",
-            false
-          )
-        );
+        .json(new ApiResponse(400, null, "Invalid task or comment ID", false));
     }
 
     // =====================================================
@@ -5058,12 +5051,10 @@ export const deleteCommentTask = async (req, res) => {
       // STEP 5: Check authorization
       // =====================================================
 
-      const isOwner =
-        task.createdBy.toString() === userId;
+      const isOwner = task.createdBy.toString() === userId;
 
       const isParticipant = task.participants?.some(
-        (participant) =>
-          participant.user.toString() === userId
+        (participant) => participant.user.toString() === userId
       );
 
       if (!isOwner && !isParticipant) {
@@ -5127,9 +5118,7 @@ export const deleteCommentTask = async (req, res) => {
       );
 
       if (!updatedTask) {
-        const error = new Error(
-          "Failed to update task comments"
-        );
+        const error = new Error("Failed to update task comments");
 
         error.statusCode = 500;
         throw error;
@@ -5157,14 +5146,10 @@ export const deleteCommentTask = async (req, res) => {
             task.createdBy.toString(),
 
             // Task participants
-            ...(task.participants || []).map(
-              (participant) =>
-                participant.user.toString()
+            ...(task.participants || []).map((participant) =>
+              participant.user.toString()
             ),
-          ].filter(
-            (recipientId) =>
-              recipientId !== userId
-          )
+          ].filter((recipientId) => recipientId !== userId)
         ),
       ];
 
@@ -5173,22 +5158,18 @@ export const deleteCommentTask = async (req, res) => {
       // =====================================================
 
       if (uniqueRecipients.length > 0) {
-        const notifications =
-          uniqueRecipients.map((recipientId) => ({
-            user: recipientId,
-            sender: userId,
-            type: "COMMENT_DELETED",
-            title: "Comment Deleted",
-            message: `${userName} deleted a comment from task "${task.title}"`,
-            todo: taskId,
-          }));
+        const notifications = uniqueRecipients.map((recipientId) => ({
+          user: recipientId,
+          sender: userId,
+          type: "COMMENT_DELETED",
+          title: "Comment Deleted",
+          message: `${userName} deleted a comment from task "${task.title}"`,
+          todo: taskId,
+        }));
 
-        await Notification.insertMany(
-          notifications,
-          {
-            session,
-          }
-        );
+        await Notification.insertMany(notifications, {
+          session,
+        });
       }
 
       // =====================================================
@@ -5196,21 +5177,17 @@ export const deleteCommentTask = async (req, res) => {
       // =====================================================
 
       if (uniqueRecipients.length > 0) {
-        const activities =
-          uniqueRecipients.map((recipientId) => ({
-            todo: taskId,
-            actor: userId,
-            targetUser: recipientId,
-            type: "COMMENT_DELETED",
-            message: `${userName} deleted a comment from task "${task.title}"`,
-          }));
+        const activities = uniqueRecipients.map((recipientId) => ({
+          todo: taskId,
+          actor: userId,
+          targetUser: recipientId,
+          type: "COMMENT_DELETED",
+          message: `${userName} deleted a comment from task "${task.title}"`,
+        }));
 
-        await TaskActivity.insertMany(
-          activities,
-          {
-            session,
-          }
-        );
+        await TaskActivity.insertMany(activities, {
+          session,
+        });
       }
     });
 
@@ -5224,41 +5201,35 @@ export const deleteCommentTask = async (req, res) => {
         // Notification event
         // =================================================
 
-        io.to(`user:${recipientId}`).emit(
-          "notification:new",
-          {
-            type: "COMMENT_DELETED",
-            title: "Comment Deleted",
-            message: `${userName} deleted a comment from the task.`,
-            sender: {
-              _id: userId,
-              name: userName,
-            },
-            todo: taskId,
-            comment: deletedComment,
-            createdAt: new Date(),
-          }
-        );
+        io.to(`user:${recipientId}`).emit("notification:new", {
+          type: "COMMENT_DELETED",
+          title: "Comment Deleted",
+          message: `${userName} deleted a comment from the task.`,
+          sender: {
+            _id: userId,
+            name: userName,
+          },
+          todo: taskId,
+          comment: deletedComment,
+          createdAt: new Date(),
+        });
 
         // =================================================
         // Activity event
         // =================================================
 
-        io.to(`user:${recipientId}`).emit(
-          "activity:new",
-          {
-            type: "COMMENT_DELETED",
-            message: `${userName} deleted a comment from the task.`,
-            actor: {
-              _id: userId,
-              name: userName,
-            },
-            targetUser: recipientId,
-            todo: taskId,
-            comment: deletedComment,
-            createdAt: new Date(),
-          }
-        );
+        io.to(`user:${recipientId}`).emit("activity:new", {
+          type: "COMMENT_DELETED",
+          message: `${userName} deleted a comment from the task.`,
+          actor: {
+            _id: userId,
+            name: userName,
+          },
+          targetUser: recipientId,
+          todo: taskId,
+          comment: deletedComment,
+          createdAt: new Date(),
+        });
       });
     }
 
@@ -5266,27 +5237,22 @@ export const deleteCommentTask = async (req, res) => {
     // STEP 14: Success response
     // =====================================================
 
-    return res
-      .status(200)
-      .json(
-        new ApiResponse(
-          200,
-          {
-            comment: deletedComment,
-          },
-          "Comment deleted successfully",
-          true
-        )
-      );
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          comment: deletedComment,
+        },
+        "Comment deleted successfully",
+        true
+      )
+    );
   } catch (error) {
     // =====================================================
     // ERROR HANDLING
     // =====================================================
 
-    console.error(
-      "Delete comment error:",
-      error
-    );
+    console.error("Delete comment error:", error);
 
     return res
       .status(error.statusCode || 500)
@@ -5294,8 +5260,7 @@ export const deleteCommentTask = async (req, res) => {
         new ApiResponse(
           error.statusCode || 500,
           null,
-          error.message ||
-            "Failed to delete comment",
+          error.message || "Failed to delete comment",
           false
         )
       );
@@ -5308,12 +5273,827 @@ export const deleteCommentTask = async (req, res) => {
   }
 };
 
-export const getSingleTaskProgress = async (req, res) => {};
+export const getSingleTaskProgress = async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const userId = req.user?.userId;
 
-// getGroupTaskProgress,
-//   getGroupTaskHistory,
-//   reorderGroupTasks,
-//   searchGroupTasks,
-//   filterGroupTasks,
-//   getOverdueGroupTasks,
-//   sortGroupTasks,
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task id", false));
+    }
+
+    const task = await Todo.findOne({
+      _id: taskId,
+      createdBy: userId,
+      isDeleted: false,
+      isArchived: false,
+    }).select(
+      "title description priority estimatedHours deadline status tags createdBy"
+    );
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    let progress = 0;
+
+    switch (task.status) {
+      case "START":
+        progress = 0;
+        break;
+
+      case "PENDING":
+        progress = 25;
+        break;
+
+      case "ON_GOING":
+        progress = 50;
+        break;
+
+      case "COMPLETED":
+        progress = 100;
+        break;
+
+      case "IN_COMPLETE":
+        progress = 0;
+        break;
+
+      default:
+        progress = 0;
+    }
+
+    const isOverdue =
+      task.deadline &&
+      new Date(task.deadline) < new Date() &&
+      task.status !== "COMPLETED";
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          taskId: task._id,
+          title: task.title,
+          status: task.status,
+          priority: task.priority,
+          progress,
+          isCompleted: task.status === "COMPLETED",
+          isOverdue: Boolean(isOverdue),
+          deadline: task.deadline,
+          estimatedHours: task.estimatedHours,
+          tags: task.tags,
+        },
+        "Single task progress fetched successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("getSingleTaskProgress error:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          "Failed to fetch single task progress",
+          false
+        )
+      );
+  }
+};
+
+// ============================================================
+// GET SINGLE TASK HISTORY
+// ============================================================
+
+export const getSingleTaskHistory = async (req, res) => {
+  try {
+    const { taskId } = req.params;
+    const userId = req.user?.userId;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid task id", false));
+    }
+
+    const task = await Todo.findOne({
+      _id: taskId,
+      createdBy: userId,
+      isDeleted: false,
+      isArchived: false,
+    }).select("_id title status createdBy");
+
+    if (!task) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Task not found", false));
+    }
+
+    const activities = await TaskActivity.find({
+      todo: taskId,
+    })
+      .populate("actor", "name profileImage")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          task: {
+            id: task._id,
+            title: task.title,
+            status: task.status,
+          },
+          activities,
+        },
+        "Single task history fetched successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("getSingleTaskHistory error:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(500, null, "Failed to fetch single task history", false)
+      );
+  }
+};
+
+// ============================================================
+// REORDER SINGLE TASKS
+// ============================================================
+
+export const reorderSingleTasks = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const userId = req.user?.userId;
+    const { taskIds } = req.body;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    if (!Array.isArray(taskIds) || taskIds.length === 0) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "taskIds must be a non-empty array", false)
+        );
+    }
+
+    const invalidTaskId = taskIds.find(
+      (id) => !mongoose.Types.ObjectId.isValid(id)
+    );
+
+    if (invalidTaskId) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "One or more task ids are invalid", false)
+        );
+    }
+
+    const uniqueTaskIds = new Set(taskIds.map(String));
+
+    if (uniqueTaskIds.size !== taskIds.length) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Duplicate task ids are not allowed",
+            false
+          )
+        );
+    }
+
+    const tasks = await Todo.find({
+      _id: { $in: taskIds },
+      createdBy: userId,
+      isDeleted: false,
+      isArchived: false,
+    })
+      .select("_id title order")
+      .session(session);
+
+    if (tasks.length !== taskIds.length) {
+      return res
+        .status(403)
+        .json(
+          new ApiResponse(
+            403,
+            null,
+            "One or more tasks do not belong to you",
+            false
+          )
+        );
+    }
+
+    const user = await User.findById(userId).select("name").session(session);
+
+    if (!user) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
+    }
+
+    await session.withTransaction(async () => {
+      const operations = taskIds.map((taskId, index) => ({
+        updateOne: {
+          filter: {
+            _id: taskId,
+            createdBy: userId,
+            isDeleted: false,
+            isArchived: false,
+          },
+          update: {
+            $set: {
+              order: index,
+            },
+          },
+        },
+      }));
+
+      await Todo.bulkWrite(operations, {
+        session,
+      });
+
+      await TaskActivity.create(
+        [
+          {
+            todo: taskIds[0],
+            actor: userId,
+            actorName: user.name,
+            type: "TASK_UPDATED",
+            message: "Single tasks reordered",
+            metadata: {
+              action: "REORDER",
+              taskIds,
+            },
+          },
+        ],
+        { session }
+      );
+    });
+
+    await Notification.create({
+      recipient: userId,
+      sender: userId,
+      todo: taskIds[0],
+      title: "Tasks reordered",
+      message: "Your single tasks were reordered successfully.",
+      type: "TASK_UPDATED",
+      metadata: {
+        action: "REORDER",
+        taskIds,
+      },
+    });
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          taskIds,
+          count: taskIds.length,
+        },
+        "Single tasks reordered successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("reorderSingleTasks error:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(500, null, "Failed to reorder single tasks", false)
+      );
+  } finally {
+    await session.endSession();
+  }
+};
+
+// ============================================================
+// SEARCH SINGLE TASKS
+// ============================================================
+
+export const searchSingleTasks = async (req, res) => {
+  try {
+    const userId = req.user?.userId;
+
+    const { search, page = 1, limit = 10 } = req.query;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    if (!search?.trim()) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Search query is required", false));
+    }
+
+    const pageNumber = Math.max(Number(page), 1);
+    const limitNumber = Math.min(Math.max(Number(limit), 1), 100);
+
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const searchRegex = new RegExp(search.trim(), "i");
+
+    const filter = {
+      createdBy: userId,
+      isDeleted: false,
+      isArchived: false,
+      $or: [
+        {
+          title: searchRegex,
+        },
+        {
+          description: searchRegex,
+        },
+        {
+          tags: searchRegex,
+        },
+      ],
+    };
+
+    const [tasks, totalTasks] = await Promise.all([
+      Todo.find(filter)
+        .sort({
+          order: 1,
+          createdAt: -1,
+        })
+        .skip(skip)
+        .limit(limitNumber)
+        .lean(),
+
+      Todo.countDocuments(filter),
+    ]);
+
+    const totalPages = Math.ceil(totalTasks / limitNumber);
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          tasks,
+          search: search.trim(),
+          pagination: {
+            currentPage: pageNumber,
+            limit: limitNumber,
+            totalTasks,
+            totalPages,
+            hasNextPage: pageNumber < totalPages,
+            hasPreviousPage: pageNumber > 1,
+          },
+        },
+        "Single tasks searched successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("searchSingleTasks error:", error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Failed to search single tasks", false));
+  }
+};
+
+// ============================================================
+// FILTER SINGLE TASKS
+// ============================================================
+
+export const filterSingleTasks = async (req, res) => {
+  try {
+    const userId = req.user?.userId;
+
+    const {
+      status,
+      priority,
+      overdue,
+      tag,
+      deadlineFrom,
+      deadlineTo,
+      page = 1,
+      limit = 10,
+      sortOrder = "asc",
+    } = req.query;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    const allowedStatuses = [
+      "START",
+      "PENDING",
+      "ON_GOING",
+      "COMPLETED",
+      "IN_COMPLETE",
+    ];
+
+    const allowedPriorities = ["LOW", "MEDIUM", "HIGH"];
+
+    if (status && !allowedStatuses.includes(status)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            `Invalid status. Allowed values: ${allowedStatuses.join(", ")}`,
+            false
+          )
+        );
+    }
+
+    if (priority && !allowedPriorities.includes(priority)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            `Invalid priority. Allowed values: ${allowedPriorities.join(", ")}`,
+            false
+          )
+        );
+    }
+
+    if (!["asc", "desc"].includes(sortOrder)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "sortOrder must be asc or desc", false)
+        );
+    }
+
+    const pageNumber = Math.max(Number(page), 1);
+
+    const limitNumber = Math.min(Math.max(Number(limit), 1), 100);
+
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const filter = {
+      createdBy: userId,
+      isDeleted: false,
+      isArchived: false,
+    };
+
+    if (status) {
+      filter.status = status;
+    }
+
+    if (priority) {
+      filter.priority = priority;
+    }
+
+    if (tag?.trim()) {
+      filter.tags = {
+        $regex: new RegExp(`^${tag.trim()}$`, "i"),
+      };
+    }
+
+    if (deadlineFrom || deadlineTo) {
+      filter.deadline = {};
+
+      if (deadlineFrom) {
+        const from = new Date(deadlineFrom);
+
+        if (Number.isNaN(from.getTime())) {
+          return res
+            .status(400)
+            .json(new ApiResponse(400, null, "Invalid deadlineFrom", false));
+        }
+
+        filter.deadline.$gte = from;
+      }
+
+      if (deadlineTo) {
+        const to = new Date(deadlineTo);
+
+        if (Number.isNaN(to.getTime())) {
+          return res
+            .status(400)
+            .json(new ApiResponse(400, null, "Invalid deadlineTo", false));
+        }
+
+        filter.deadline.$lte = to;
+      }
+    }
+
+    if (overdue === "true") {
+      filter.deadline = {
+        ...(filter.deadline || {}),
+        $lt: new Date(),
+      };
+
+      filter.status = {
+        $ne: "COMPLETED",
+      };
+    }
+
+    const direction = sortOrder === "asc" ? 1 : -1;
+
+    const [tasks, totalTasks] = await Promise.all([
+      Todo.find(filter)
+        .sort({
+          deadline: direction,
+          order: 1,
+          _id: -1,
+        })
+        .skip(skip)
+        .limit(limitNumber)
+        .lean(),
+
+      Todo.countDocuments(filter),
+    ]);
+
+    const totalPages = Math.ceil(totalTasks / limitNumber);
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          tasks,
+          filters: {
+            status: status || null,
+            priority: priority || null,
+            overdue: overdue === "true",
+            tag: tag || null,
+            deadlineFrom: deadlineFrom || null,
+            deadlineTo: deadlineTo || null,
+          },
+          pagination: {
+            currentPage: pageNumber,
+            limit: limitNumber,
+            totalTasks,
+            totalPages,
+            hasNextPage: pageNumber < totalPages,
+            hasPreviousPage: pageNumber > 1,
+          },
+        },
+        "Single tasks filtered successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("filterSingleTasks error:", error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Failed to filter single tasks", false));
+  }
+};
+
+// ============================================================
+// GET OVERDUE SINGLE TASKS
+// ============================================================
+
+export const getOverdueSingleTasks = async (req, res) => {
+  try {
+    const userId = req.user?.userId;
+
+    const { page = 1, limit = 10, sortOrder = "asc" } = req.query;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    if (!["asc", "desc"].includes(sortOrder)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "sortOrder must be asc or desc", false)
+        );
+    }
+
+    const pageNumber = Math.max(Number(page), 1);
+
+    const limitNumber = Math.min(Math.max(Number(limit), 1), 100);
+
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const filter = {
+      createdBy: userId,
+      isDeleted: false,
+      isArchived: false,
+      deadline: {
+        $lt: new Date(),
+      },
+      status: {
+        $ne: "COMPLETED",
+      },
+    };
+
+    const direction = sortOrder === "asc" ? 1 : -1;
+
+    const [tasks, totalTasks] = await Promise.all([
+      Todo.find(filter)
+        .sort({
+          deadline: direction,
+          order: 1,
+        })
+        .skip(skip)
+        .limit(limitNumber)
+        .lean(),
+
+      Todo.countDocuments(filter),
+    ]);
+
+    const now = Date.now();
+
+    const overdueTasks = tasks.map((task) => {
+      const deadline = new Date(task.deadline).getTime();
+
+      const overdueMilliseconds = now - deadline;
+
+      const overdueHours = Math.floor(overdueMilliseconds / (1000 * 60 * 60));
+
+      const overdueDays = Math.floor(overdueHours / 24);
+
+      return {
+        ...task,
+        overdueHours,
+        overdueDays,
+      };
+    });
+
+    const totalPages = Math.ceil(totalTasks / limitNumber);
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          tasks: overdueTasks,
+          pagination: {
+            currentPage: pageNumber,
+            limit: limitNumber,
+            totalTasks,
+            totalPages,
+            hasNextPage: pageNumber < totalPages,
+            hasPreviousPage: pageNumber > 1,
+          },
+        },
+        "Overdue single tasks fetched successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("getOverdueSingleTasks error:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          "Failed to fetch overdue single tasks",
+          false
+        )
+      );
+  }
+};
+
+// ============================================================
+// SORT SINGLE TASKS
+// ============================================================
+
+export const sortSingleTasks = async (req, res) => {
+  try {
+    const userId = req.user?.userId;
+
+    const {
+      sortBy = "createdAt",
+      sortOrder = "desc",
+      page = 1,
+      limit = 10,
+    } = req.query;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    const allowedSortFields = [
+      "createdAt",
+      "updatedAt",
+      "deadline",
+      "priority",
+      "status",
+      "title",
+      "estimatedHours",
+      "order",
+    ];
+
+    if (!allowedSortFields.includes(sortBy)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            `Invalid sortBy. Allowed values: ${allowedSortFields.join(", ")}`,
+            false
+          )
+        );
+    }
+
+    if (!["asc", "desc"].includes(sortOrder)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "sortOrder must be asc or desc", false)
+        );
+    }
+
+    const pageNumber = Math.max(Number(page), 1);
+
+    const limitNumber = Math.min(Math.max(Number(limit), 1), 100);
+
+    const skip = (pageNumber - 1) * limitNumber;
+
+    const direction = sortOrder === "asc" ? 1 : -1;
+
+    const filter = {
+      createdBy: userId,
+      isDeleted: false,
+      isArchived: false,
+    };
+
+    const [tasks, totalTasks] = await Promise.all([
+      Todo.find(filter)
+        .sort({
+          [sortBy]: direction,
+          _id: -1,
+        })
+        .skip(skip)
+        .limit(limitNumber)
+        .lean(),
+
+      Todo.countDocuments(filter),
+    ]);
+
+    const totalPages = Math.ceil(totalTasks / limitNumber);
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          tasks,
+          sorting: {
+            sortBy,
+            sortOrder,
+          },
+          pagination: {
+            currentPage: pageNumber,
+            limit: limitNumber,
+            totalTasks,
+            totalPages,
+            hasNextPage: pageNumber < totalPages,
+            hasPreviousPage: pageNumber > 1,
+          },
+        },
+        "Single tasks sorted successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("sortSingleTasks error:", error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Failed to sort single tasks", false));
+  }
+};
