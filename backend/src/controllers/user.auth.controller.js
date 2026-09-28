@@ -10,6 +10,10 @@ import { signAccessToken, signRefreshToken } from "../utils/generateTokens.js";
 import { setAuthCookies } from "../utils/setAuthCookies.js";
 import { uploadToCloudinary } from "../utils/fileupload.js";
 import jwt from "jsonwebtoken";
+import { clearAuthCookies } from "../utils/clearAuthCookies.js";
+import { getCache, setCache, deleteCache } from "../service/redis/redis.service.js";
+import { userKey } from "../utils/chacheKeys.js";
+
 
 const registerUser = async (req, res) => {
   //get all the values
@@ -609,15 +613,45 @@ const updateUserProfile = async (req, res) => {
 const getUserProfile = async (req, res) => {
   try {
     const { id } = req.params;
-    const user = await User.findById(id).select(
-      "-password -refreshToken -passwordResetToken -passwordResetTokenExpires"
-    );
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid user ID", false));
+    }
+
+    const cacheKey = userKey(id);
+
+    // Check Redis cache first
+    const cachedUser = await getCache(cacheKey);
+
+    if (cachedUser) {
+      return res
+        .status(200)
+        .json(
+          new ApiResponse(
+            200,
+            cachedUser,
+            "User profile fetched successfully",
+            true
+          )
+        );
+    }
+
+    // Cache miss → fetch from MongoDB
+    const user = await User.findById(id)
+      .select(
+        "-password -refreshToken -passwordResetToken -passwordResetTokenExpires"
+      )
+      .lean();
 
     if (!user) {
       return res
         .status(404)
         .json(new ApiResponse(404, null, "User not found", false));
     }
+
+    // Store user in Redis
+    await setCache(cacheKey, user, 300);
 
     return res
       .status(200)

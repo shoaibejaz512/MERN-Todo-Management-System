@@ -1,12 +1,10 @@
+import Redis from "ioredis";
 import { green, greenBright, red, yellowBright } from "colorette";
-import { createClient } from "ioredis";
 
-const redisClient = createClient({
-  url: process.env.REDIS_URL,
-});
+const redisClient = new Redis(process.env.REDIS_URL);
 
 redisClient.on("error", (error) => {
-  console.error(red(`Redis Client Error:, ${error}`));
+  console.error(red(`Redis Client Error: ${error.message}`));
 });
 
 redisClient.on("connect", () => {
@@ -20,13 +18,5 @@ redisClient.on("ready", () => {
 redisClient.on("reconnecting", () => {
   console.log(yellowBright("Redis reconnecting..."));
 });
-
-export const connectRedis = async () => {
-  if (redisClient.isOpen) {
-    return;
-  }
-
-  await redisClient.connect();
-};
 
 export default redisClient;
