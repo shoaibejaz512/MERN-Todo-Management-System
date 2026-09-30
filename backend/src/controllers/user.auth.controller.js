@@ -13,6 +13,7 @@ import jwt from "jsonwebtoken";
 import { clearAuthCookies } from "../utils/clearAuthCookies.js";
 import { getCache, setCache, deleteCache } from "../service/redis/redis.service.js";
 import { userKey, usersKey } from "../utils/chacheKeys.js";
+import { deleteFromCloudinary } from "../service/cloudinary.service.js";
 
 
 const registerUser = async (req, res) => {
@@ -539,74 +540,110 @@ const refreshAccessToken = async (req, res) => {
 };
 
 const updateUserProfile = async (req, res) => {
-  //STEP:1 TAKE DATA FROM THE USER
-  const { name, email, bio } = req.body;
   try {
-    //STEP:2 VALIDATE FILEDS
-    if (!name || !email || !bio) {
+    // STEP 1: Get data from request
+    const { name, email, bio } = req.body;
+    const { id } = req.params;
+
+    //VALIDATE THE ID 
+    if(!mongoose.Types.ObjectId.isValid(id)){
+      return res.status(400).json(new ApiResponse(400,null,"Invalid id",false));
+    }
+
+    // STEP 2: Validate required fields
+    if (!name?.trim() || !email?.trim()) {
       return res
-        .status(403)
-        .json(new ApiResponse(403, null, "All fields are required", false));
+        .status(400)
+        .json(new ApiResponse(400, null, "Name and email are required", false));
     }
 
-    //SETUP PROFILE IMAGE UPDATE LOGIC
-    let profileImage;
-    if (req.file) {
-      const result = await uploadToCloudinary(req.file.buffer);
+    // STEP 3: Normalize input
+    const normalizedName = name.trim();
+    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedBio = bio?.trim() || "";
 
-      profileImage = {
-        url: result.secure_url,
-        publicId: result.public_id,
-      };
-    }
+    // STEP 4: Find user
+    const existingUser = await User.findById(id);
 
-    //CHECK USER ALREADY EXIST JUST FOR DUPLICATE EMAIL
-    const existingUser = await User.findOne({
-      email,
-      _id: { $ne: req.user.userId },
-    });
-
-    if (existingUser) {
-      return res
-        .status(409)
-        .json(new ApiResponse(409, null, "Email already exists", false));
-    }
-
-    //STEP:3 FIND USER
-    const user = await User.findByIdAndUpdate(
-      req.user.userId,
-      {
-        name,
-        email,
-        bio,
-      },
-      {
-        new: true,
-        runValidators: true,
-      }
-    ).select("-password -refreshToken");
-    //STEP:4 CHECK USER IS EXIST OR NO T
-    if (!user) {
+    if (!existingUser) {
       return res
         .status(404)
         .json(new ApiResponse(404, null, "User not found", false));
     }
 
-    //UPDATE THE PROFILE IMAGE IF IS EXIST
-    if (profileImage) {
-      user.profileImage = profileImage;
-      await user.save();
+    // STEP 5: Check duplicate email
+    const duplicateEmail = await User.findOne({
+      email: normalizedEmail,
+      _id: { $ne: id },
+    });
+
+    if (duplicateEmail) {
+      return res
+        .status(409)
+        .json(new ApiResponse(409, null, "Email already exists", false));
     }
 
-    //STEP:6 RETURN SUCCESS RESPONSE TO THE USER
+    // Keep old image information
+    const oldProfileImage = existingUser.profileImage;
+
+    // STEP 6: Upload new profile image if provided
+    let newProfileImage = existingUser.profileImage;
+
+    if (req.file) {
+      const result = await uploadToCloudinary(req.file.buffer);
+
+      newProfileImage = {
+        url: result.secure_url,
+        publicId: result.public_id,
+      };
+    }
+
+    // STEP 7: Update user
+    existingUser.name = normalizedName;
+    existingUser.email = normalizedEmail;
+    existingUser.bio = normalizedBio;
+    existingUser.profileImage = newProfileImage;
+
+    const user = await existingUser.save();
+
+    // STEP 8: Remove sensitive fields from response
+    user.password = undefined;
+    user.refreshTokens = undefined;
+    user.passwordResetToken = undefined;
+    user.passwordResetTokenExpires = undefined;
+
+    // STEP 9: Invalidate user profile cache
+    const cacheKey = userKey(id);
+
+    await deleteCache(cacheKey);
+
+    // STEP 10: Delete old Cloudinary image
+    // Only delete if a new image was uploaded
+    // and an old image actually existed.
+    if (
+      req.file &&
+      oldProfileImage?.publicId &&
+      oldProfileImage.publicId !== newProfileImage.publicId
+    ) {
+      try {
+        await deleteFromCloudinary(oldProfileImage.publicId);
+      } catch (cloudinaryError) {
+        console.error(
+          `Old profile image deletion failed: ${cloudinaryError.message}`
+        );
+      }
+    }
+
+    // STEP 11: Return success response
     return res
-      .status(201)
-      .json(new ApiResponse(201, user, "Profile update successfully", true));
+      .status(200)
+      .json(new ApiResponse(200, user, "Profile updated successfully", true));
   } catch (error) {
-    console.log(red(`Profile update error : ${error.message}`));
+    console.error(`Profile update error: ${error.message}`);
+
     return res
       .status(500)
-      .json(new ApiResponse(500, null, error.message, false));
+      .json(new ApiResponse(500, null, "Failed to update profile", false));
   }
 };
 
