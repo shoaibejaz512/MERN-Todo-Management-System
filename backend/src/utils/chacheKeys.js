@@ -15,3 +15,6 @@ export const groupProgressKey = (taskId) => `group:progress:${taskId}`;
 export const groupHistoryKey = (taskId) => `group:history:${taskId}`;
 
 export const userKey = (userId) => `user:profile:${userId}`;
+
+export const usersKey = (page, limit, search) =>
+  `users:profile:${page}:${limit}:${search}`;

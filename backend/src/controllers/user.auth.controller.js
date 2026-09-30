@@ -12,7 +12,7 @@ import { uploadToCloudinary } from "../utils/fileupload.js";
 import jwt from "jsonwebtoken";
 import { clearAuthCookies } from "../utils/clearAuthCookies.js";
 import { getCache, setCache, deleteCache } from "../service/redis/redis.service.js";
-import { userKey } from "../utils/chacheKeys.js";
+import { userKey, usersKey } from "../utils/chacheKeys.js";
 
 
 const registerUser = async (req, res) => {
@@ -620,6 +620,7 @@ const getUserProfile = async (req, res) => {
     }
 
     const cacheKey = userKey(id);
+   
 
     // Check Redis cache first
     const cachedUser = await getCache(cacheKey);
@@ -669,42 +670,74 @@ const getAllUsers = async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
-    const skip = (page - 1) * limit;
-    const search = req.query.search || "";
+    const search = req.query.search?.trim() || "";
 
-    // SEARCH KA QUERY BANANA
-    // agar search text diya gaya hai to name ya email mein dhoondo
+    const skip = (page - 1) * limit;
+
+    // Create unique cache key for pagination + search
+    const cacheKey = usersKey(page, limit, search);
+
+    // Check Redis cache first
+    const cachedUsers = await getCache(cacheKey);
+
+    if (cachedUsers) {
+      return res
+        .status(200)
+        .json(
+          new ApiResponse(200, cachedUsers, "Users fetched successfully", true)
+        );
+    }
+
+    // Build search query
     const searchQuery = search
       ? {
           $or: [
-            { name: { $regex: search, $options: "i" } },
-            { email: { $regex: search, $options: "i" } },
+            {
+              name: {
+                $regex: search,
+                $options: "i",
+              },
+            },
+            {
+              email: {
+                $regex: search,
+                $options: "i",
+              },
+            },
           ],
         }
       : {};
 
-    const users = await User.find(searchQuery)
-      .select(
-        "-password -refreshToken -passwordResetToken -passwordResetTokenExpires"
-      )
-      .skip(skip)
-      .limit(limit);
+    // Fetch users and total count
+    const [users, total] = await Promise.all([
+      User.find(searchQuery)
+        .select(
+          "-password -refreshToken -passwordResetToken -passwordResetTokenExpires"
+        )
+        .skip(skip)
+        .limit(limit)
+        .lean(),
 
-    const total = await User.countDocuments(searchQuery);
+      User.countDocuments(searchQuery),
+    ]);
 
-    return res.status(200).json(
-      new ApiResponse(
-        200,
-        {
-          users,
-          total,
-          page,
-          totalPages: Math.ceil(total / limit),
-        },
-        "Users fetched successfully",
-        true
-      )
-    );
+    // Prepare response data
+    const responseData = {
+      users,
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
+
+    // Store complete response in Redis
+    await setCache(cacheKey, responseData, 300);
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(200, responseData, "Users fetched successfully", true)
+      );
   } catch (error) {
     return res
       .status(500)
