@@ -647,6 +647,7 @@ const updateUserProfile = async (req, res) => {
   }
 };
 
+// other users profile 
 const getUserProfile = async (req, res) => {
   try {
     const { id } = req.params;
@@ -782,19 +783,37 @@ const getAllUsers = async (req, res) => {
   }
 };
 
+
+//requested user profile
 const getCurrentUser = async (req, res) => {
   try {
     const userId = req.user.userId;
+    let cacheKey = userKey(userId);
+    let cachedUser = await getCache(cacheKey);
+    if(cachedUser){
+      return res
+        .status(200).json(
+          new ApiResponse(
+            200,
+            cachedUser,
+            "Get current user profile successfully",
+            true,
+          )
+        );
+    }
     //STEP:1 FIND USER BY ID
     const user = await User.findById(userId).select(
       "-password -refreshToken -passwordResetToken -passwordResetTokenExpires"
-    );
+    ).lean();
     //STEP:2 VALIDATE THE USER EXIST OR NOT
     if (!user) {
       return res
         .status(404)
         .json(new ApiResponse(404, null, "User not found", false));
     }
+
+    await setCache(cacheKey, user, 300); // Cache the user data for 5 minutes
+
     //STEP:3 RETURN SUCCESS RESPONSE TO THE USER
     return res
       .status(200)
@@ -816,13 +835,85 @@ const getCurrentUser = async (req, res) => {
 const deleteMyAccount = async (req, res) => {
   const user = await User.findByIdAndDelete(req.user.userId);
 
+  if(!user){
+    return res
+      .status(404)
+      .json(new ApiResponse(404, null, "User not found", false));
+  }
+
   clearAuthCookies(res);
+
+  let cacheKey = userKey(req.user.userId);
+  await deleteCache(cacheKey);
 
   return res
     .status(200)
     .json(new ApiResponse(200, null, "Account deleted successfully", true));
 };
-const searchUser = async (req,res) => {};
+const searchUser = async (req, res) => {
+  try {
+    const { q } = req.query;
+
+    if (!q?.trim()) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Search query is required", false));
+    }
+
+    const userQuery = q.trim().toLowerCase();
+
+    // Redis cache key
+    const cacheKey = `user:search:${userQuery}`;
+
+    // 1. Check Redis first
+    const cachedUsers = await getCache(cacheKey);
+
+    if (cachedUsers) {
+      return res
+        .status(200)
+        .json(
+          new ApiResponse(
+            200,
+            cachedUsers,
+            "Users retrieved successfully",
+            true
+          )
+        );
+    }
+
+    // 2. Cache miss → search MongoDB
+    const users = await User.find({
+      name: {
+        $regex: userQuery,
+        $options: "i",
+      },
+    })
+      .select("name email profileImage bio")
+      .limit(10)
+      .lean();
+
+    // 3. No users found
+    if (!users.length) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, [], "No users found", false));
+    }
+
+    // 4. Store result in Redis for 5 minutes
+    await setCache(cacheKey, users, 300);
+
+    // 5. Return users
+    return res
+      .status(200)
+      .json(new ApiResponse(200, users, "Users retrieved successfully", true));
+  } catch (error) {
+    console.error("Search users error:", error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Internal server error", false));
+  }
+};
 export {
   registerUser,
   loginUser,
