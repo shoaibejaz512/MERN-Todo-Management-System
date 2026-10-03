@@ -18,3 +18,7 @@ export const userKey = (userId) => `user:profile:${userId}`;
 
 export const usersKey = (page, limit, search) =>
   `users:profile:${page}:${limit}:${search}`;
+
+export const emailVerificationOtpKey = (email) => `email:otp:${email}`;
+
+export const passwordResetOtpKey = (email) => `password:otp:${email}`;

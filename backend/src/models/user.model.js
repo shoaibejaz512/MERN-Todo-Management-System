@@ -2,7 +2,6 @@ import mongoose from "mongoose";
 import bcryptjs from "bcryptjs";
 import { emailRegex } from "../constants.js";
 
-
 const refreshTokenSchema = new mongoose.Schema(
   {
     token: {
@@ -113,6 +112,10 @@ const userSchema = new mongoose.Schema(
       default: false,
     },
     refreshTokens: [refreshTokenSchema],
+    isVerified: {
+      type: Boolean,
+      default: false,
+    },
   },
   { timestamps: true }
 );

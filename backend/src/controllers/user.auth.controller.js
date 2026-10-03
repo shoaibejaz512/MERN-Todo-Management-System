@@ -11,10 +11,15 @@ import { setAuthCookies } from "../utils/setAuthCookies.js";
 import { uploadToCloudinary } from "../utils/fileupload.js";
 import jwt from "jsonwebtoken";
 import { clearAuthCookies } from "../utils/clearAuthCookies.js";
-import { getCache, setCache, deleteCache } from "../service/redis/redis.service.js";
+import {
+  getCache,
+  setCache,
+  deleteCache,
+} from "../service/redis/redis.service.js";
 import { userKey, usersKey } from "../utils/chacheKeys.js";
 import { deleteFromCloudinary } from "../service/cloudinary.service.js";
-
+import mongoose from "mongoose";
+import crypto from "crypto";
 
 const registerUser = async (req, res) => {
   //get all the values
@@ -545,9 +550,11 @@ const updateUserProfile = async (req, res) => {
     const { name, email, bio } = req.body;
     const { id } = req.params;
 
-    //VALIDATE THE ID 
-    if(!mongoose.Types.ObjectId.isValid(id)){
-      return res.status(400).json(new ApiResponse(400,null,"Invalid id",false));
+    //VALIDATE THE ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid id", false));
     }
 
     // STEP 2: Validate required fields
@@ -647,7 +654,7 @@ const updateUserProfile = async (req, res) => {
   }
 };
 
-// other users profile 
+// other users profile
 const getUserProfile = async (req, res) => {
   try {
     const { id } = req.params;
@@ -658,7 +665,6 @@ const getUserProfile = async (req, res) => {
     }
 
     const cacheKey = userKey(id);
-   
 
     // Check Redis cache first
     const cachedUser = await getCache(cacheKey);
@@ -783,28 +789,30 @@ const getAllUsers = async (req, res) => {
   }
 };
 
-
 //requested user profile
 const getCurrentUser = async (req, res) => {
   try {
     const userId = req.user.userId;
     let cacheKey = userKey(userId);
     let cachedUser = await getCache(cacheKey);
-    if(cachedUser){
+    if (cachedUser) {
       return res
-        .status(200).json(
+        .status(200)
+        .json(
           new ApiResponse(
             200,
             cachedUser,
             "Get current user profile successfully",
-            true,
+            true
           )
         );
     }
     //STEP:1 FIND USER BY ID
-    const user = await User.findById(userId).select(
-      "-password -refreshToken -passwordResetToken -passwordResetTokenExpires"
-    ).lean();
+    const user = await User.findById(userId)
+      .select(
+        "-password -refreshToken -passwordResetToken -passwordResetTokenExpires"
+      )
+      .lean();
     //STEP:2 VALIDATE THE USER EXIST OR NOT
     if (!user) {
       return res
@@ -835,7 +843,7 @@ const getCurrentUser = async (req, res) => {
 const deleteMyAccount = async (req, res) => {
   const user = await User.findByIdAndDelete(req.user.userId);
 
-  if(!user){
+  if (!user) {
     return res
       .status(404)
       .json(new ApiResponse(404, null, "User not found", false));
@@ -914,6 +922,210 @@ const searchUser = async (req, res) => {
       .json(new ApiResponse(500, null, "Internal server error", false));
   }
 };
+
+
+//save otp inside redis not db 
+const generateEmailVerificationOtp = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid user id", false));
+    }
+
+    const user = await User.findById(id).select("email isVerified");
+
+    if (!user) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
+    }
+
+    if (user.isVerified) {
+      return res
+        .status(409)
+        .json(new ApiResponse(409, null, "Email is already verified", false));
+    }
+
+    const cacheKey = emailVerificationOtpKey(id);
+
+    // Check if OTP already exists
+    const existingOtp = await getCache(cacheKey);
+
+    if (existingOtp) {
+      return res.status(429).json(
+        new ApiResponse(
+          429,
+          null,
+          "OTP already sent. Please wait before requesting another OTP.",
+          false
+        )
+      );
+    }
+
+    // Generate 6-digit OTP
+    const otp = crypto.randomInt(100000, 1000000).toString();
+
+    // Store OTP in Redis for 10 minutes
+    await setCache(cacheKey, otp, 600);
+
+    await sendEmail({
+      to: user.email,
+      subject: "Verify your FlowDo email",
+      text: `Your FlowDo verification OTP is ${otp}. It expires in 10 minutes.`,
+    });
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        null,
+        "Verification OTP sent successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error(`Generate email OTP failed: ${error.message}`);
+
+    return res.status(error.statusCode || 500).json(
+      new ApiResponse(
+        error.statusCode || 500,
+        null,
+        error.message || "Internal server error",
+        false
+      )
+    );
+  }
+};
+
+const verifyEmail = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    const { id } = req.params;
+    const { otp } = req.body;
+
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid user id", false));
+    }
+
+    if (!otp || !/^\d{6}$/.test(otp)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "OTP must be a valid 6-digit code", false)
+        );
+    }
+
+    const cacheKey = emailVerificationOtpKey(id);
+
+    // Get OTP from Redis
+    const storedOtp = await getCache(cacheKey);
+
+    if (!storedOtp) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Verification OTP has expired or was not found",
+            false
+          )
+        );
+    }
+
+    // Compare OTP
+    const hashedOtp = crypto.createHash("sha256").update(otp).digest("hex");
+
+    if (hashedOtp !== storedOtp) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid verification OTP", false));
+    }
+
+    let user;
+    let notification;
+
+    await session.withTransaction(async () => {
+      user = await User.findById(id)
+        .select("name profileImage bio isVerified")
+        .session(session);
+
+      if (!user) {
+        const error = new Error("User not found");
+        error.statusCode = 404;
+        throw error;
+      }
+
+      if (user.isVerified) {
+        const error = new Error("Email is already verified");
+        error.statusCode = 409;
+        throw error;
+      }
+
+      // Verify email
+      user.isVerified = true;
+
+      await user.save({ session });
+
+      // Create notification
+      [notification] = await Notification.create(
+        [
+          {
+            user: user._id,
+            sender: user._id,
+            type: "EMAIL_VERIFIED",
+            title: "Email Verified",
+            message: `${user.name}, your email has been verified.`,
+          },
+        ],
+        { session }
+      );
+    });
+
+    // Delete OTP only after successful MongoDB transaction
+    await deleteCache(cacheKey);
+
+    // Emit only after transaction succeeds
+    io.to(`user:${id}`).emit("notification", notification);
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          id: user._id,
+          name: user.name,
+          profileImage: user.profileImage,
+          bio: user.bio,
+          isVerified: user.isVerified,
+        },
+        "Email verified successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error(`Email verification failed: ${error.message}`);
+
+    const statusCode = error.statusCode || 500;
+
+    return res
+      .status(statusCode)
+      .json(
+        new ApiResponse(
+          statusCode,
+          null,
+          error.message || "Internal server error",
+          false
+        )
+      );
+  } finally {
+    await session.endSession();
+  }
+};
 export {
   registerUser,
   loginUser,
@@ -929,4 +1141,24 @@ export {
   changePassword,
   deleteMyAccount,
   searchUser,
+  generateEmailVerificationOtp,
+  verifyEmail,
 };
+
+// verifyEmail;
+// updateEmail;
+// getUserStats;
+// Total Tasks
+// Completed Tasks
+// Pending Tasks
+// Overdue Tasks
+// Collaborative Tasks
+// Created Tasks
+// getUserActivity;
+// getUserNotifications;
+// getUserInvitations;
+// getUserSessions;
+// deactivateMyAccount;
+// 2. resendEmailVerificationOTP
+// 4. markNotificationAsRead
+// 5. markAllNotificationsAsRead
