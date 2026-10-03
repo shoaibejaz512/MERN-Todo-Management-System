@@ -1126,6 +1126,16 @@ const verifyEmail = async (req, res) => {
     await session.endSession();
   }
 };
+
+const updateEmail = async (req, res) => {};
+const getUserStats = async (req, res) => {};
+const getUserActivity = async (req, res) => {};
+const getUserNotifications = async (req, res) => {};
+const getUserSessions = async (req, res) => {};
+const markNotificationAsRead = async (req, res) => {};
+const markAllNotificationsAsRead = async (req, res) => {};
+const resendEmailVerificationOTP = async (req, res) => {};
+
 export {
   registerUser,
   loginUser,
@@ -1145,7 +1155,7 @@ export {
   verifyEmail,
 };
 
-// verifyEmail;
+// verifyEmail;✅✅✅✅
 // updateEmail;
 // getUserStats;
 // Total Tasks
