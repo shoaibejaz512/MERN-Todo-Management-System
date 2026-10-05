@@ -1,6 +1,7 @@
 import { bgGreen, green, red, redBright } from "colorette";
 import {
   sendPasswordResetOtp,
+  sendUpdateEmailOtp,
   sendWelcomeEmail,
 } from "../service/nodemailers/emailService.js";
 import ApiResponse from "../utils/apiResponseHandler.js";
@@ -16,7 +17,7 @@ import {
   setCache,
   deleteCache,
 } from "../service/redis/redis.service.js";
-import { userKey, usersKey } from "../utils/chacheKeys.js";
+import { emailVerificationOtpKey, updateEmailOtp, userKey, usersKey } from "../utils/chacheKeys.js";
 import { deleteFromCloudinary } from "../service/cloudinary.service.js";
 import mongoose from "mongoose";
 import crypto from "crypto";
@@ -968,8 +969,8 @@ const generateEmailVerificationOtp = async (req, res) => {
     // Generate 6-digit OTP
     const otp = crypto.randomInt(100000, 1000000).toString();
 
-    // Store OTP in Redis for 10 minutes
-    await setCache(cacheKey, otp, 600);
+    // Store OTP in Redis for 5 minutes
+    await setCache(cacheKey, otp, 300);
 
     await sendEmail({
       to: user.email,
@@ -1126,8 +1127,620 @@ const verifyEmail = async (req, res) => {
     await session.endSession();
   }
 };
+// ============================================================
+// Generate OTP for Email Update
+// ============================================================
 
-const updateEmail = async (req, res) => {};
+
+const generateUpdateEmailOtp = async (req, res) => {
+  try {
+    // ----------------------------------------------------------
+    // 1. Get authenticated user ID
+    // ----------------------------------------------------------
+
+    const userId = req.user?.userId;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json(
+          new ApiResponse(
+            401,
+            null,
+            "Unauthorized",
+            false
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 2. Validate MongoDB ObjectId
+    // ----------------------------------------------------------
+
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Invalid user id",
+            false
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 3. Redis keys
+    // ----------------------------------------------------------
+
+    const otpKey = updateEmailOtp(userId);
+
+    const cooldownKey = `update-email-otp:cooldown:${userId}`;
+
+    // ----------------------------------------------------------
+    // 4. Check resend cooldown
+    //
+    // User must wait 60 seconds before requesting
+    // another OTP.
+    // ----------------------------------------------------------
+
+    const cooldownExists = await getCache(cooldownKey);
+
+    if (cooldownExists) {
+      return res
+        .status(429)
+        .json(
+          new ApiResponse(
+            429,
+            null,
+            "Please wait before requesting another OTP",
+            false
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 5. Check if an active OTP already exists
+    //
+    // OTP remains valid for 5 minutes.
+    // ----------------------------------------------------------
+
+    const existingOtp = await getCache(otpKey);
+
+    if (existingOtp) {
+      return res
+        .status(429)
+        .json(
+          new ApiResponse(
+            429,
+            null,
+            "An OTP has already been sent. Please check your email.",
+            false
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 6. Find authenticated user
+    // ----------------------------------------------------------
+
+    const user = await User.findById(userId)
+      .select("_id name email")
+      .lean();
+
+    if (!user) {
+      return res
+        .status(404)
+        .json(
+          new ApiResponse(
+            404,
+            null,
+            "User not found",
+            false
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 7. Generate cryptographically secure 6-digit OTP
+    // ----------------------------------------------------------
+
+    const otp = crypto
+      .randomInt(100000, 1000000)
+      .toString();
+
+    // ----------------------------------------------------------
+    // 8. Hash OTP before storing it in Redis
+    //
+    // Raw OTP is only used for sending the email.
+    // Redis stores only the SHA-256 hash.
+    // ----------------------------------------------------------
+
+    const hashedOtp = crypto
+      .createHash("sha256")
+      .update(otp)
+      .digest("hex");
+
+    // ----------------------------------------------------------
+    // 9. Store hashed OTP in Redis
+    //
+    // TTL = 300 seconds = 5 minutes
+    // ----------------------------------------------------------
+
+    await setCache(
+      otpKey,
+      hashedOtp,
+      300
+    );
+
+    // ----------------------------------------------------------
+    // 10. Set resend cooldown
+    //
+    // TTL = 60 seconds
+    // ----------------------------------------------------------
+
+    await setCache(
+      cooldownKey,
+      "1",
+      60
+    );
+
+    // ----------------------------------------------------------
+    // 11. Send OTP through email
+    // ----------------------------------------------------------
+
+    try {
+      await sendUpdateEmailOtp(user, otp);
+    } catch (emailError) {
+      // Email failed, so invalidate the OTP and cooldown.
+      await Promise.allSettled([
+        deleteCache(otpKey),
+        deleteCache(cooldownKey),
+      ]);
+
+      console.error(
+        "Update email OTP email error:",
+        emailError.message
+      );
+
+      return res
+        .status(500)
+        .json(
+          new ApiResponse(
+            500,
+            null,
+            "Failed to send OTP",
+            false
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 12. Success response
+    //
+    // NEVER return the OTP.
+    // ----------------------------------------------------------
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          null,
+          "OTP sent successfully. Please check your email.",
+          true
+        )
+      );
+  } catch (error) {
+    console.error(
+      "Generate update email OTP error:",
+      error.message
+    );
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          "Failed to generate OTP",
+          false
+        )
+      );
+  }
+};
+
+
+const verifyUpdateEmailOtp = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    // ----------------------------------------------------------
+    // 1. Get authenticated user
+    // ----------------------------------------------------------
+
+    const userId = req.user?.userId;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json(
+          new ApiResponse(
+            401,
+            null,
+            "Unauthorized",
+            false
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 2. Get request data
+    // ----------------------------------------------------------
+
+    const { otp, email } = req.body;
+
+    // ----------------------------------------------------------
+    // 3. Validate user ID
+    // ----------------------------------------------------------
+
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Invalid user id",
+            false
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 4. Validate OTP
+    // ----------------------------------------------------------
+
+    if (!otp || !/^\d{6}$/.test(otp)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "OTP must be a valid 6-digit code",
+            false
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 5. Validate email
+    // ----------------------------------------------------------
+
+    if (!email || typeof email !== "string") {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Email is required",
+            false
+          )
+        );
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    // Basic email validation
+    const emailRegex =
+      /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    if (!emailRegex.test(normalizedEmail)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Please provide a valid email address",
+            false
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 6. Redis keys
+    // ----------------------------------------------------------
+
+    const otpKey = updateEmailOtp(userId);
+
+    const attemptKey =
+      `update-email-otp:attempts:${userId}`;
+
+    // ----------------------------------------------------------
+    // 7. Get stored hashed OTP
+    // ----------------------------------------------------------
+
+    const storedHashedOtp = await getCache(otpKey);
+
+    if (!storedHashedOtp) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "OTP has expired or was not found",
+            false
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 8. Check OTP attempts
+    //
+    // Maximum 5 incorrect attempts.
+    // ----------------------------------------------------------
+
+    const attempts =
+      Number(await getCache(attemptKey)) || 0;
+
+    if (attempts >= 5) {
+      await deleteCache(otpKey);
+      await deleteCache(attemptKey);
+
+      return res
+        .status(429)
+        .json(
+          new ApiResponse(
+            429,
+            null,
+            "Too many incorrect OTP attempts. Please request a new OTP.",
+            false
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 9. Hash submitted OTP
+    // ----------------------------------------------------------
+
+    const hashedOtp = crypto
+      .createHash("sha256")
+      .update(otp)
+      .digest("hex");
+
+    // ----------------------------------------------------------
+    // 10. Compare OTP securely
+    // ----------------------------------------------------------
+
+    const storedBuffer =
+      Buffer.from(storedHashedOtp, "hex");
+
+    const providedBuffer =
+      Buffer.from(hashedOtp, "hex");
+
+    const isOtpValid =
+      storedBuffer.length === providedBuffer.length &&
+      crypto.timingSafeEqual(
+        storedBuffer,
+        providedBuffer
+      );
+
+    if (!isOtpValid) {
+      const newAttempts = attempts + 1;
+
+      // Keep attempt counter for the remaining OTP lifetime.
+      await setCache(
+        attemptKey,
+        newAttempts.toString(),
+        300
+      );
+
+      if (newAttempts >= 5) {
+        await deleteCache(otpKey);
+        await deleteCache(attemptKey);
+
+        return res
+          .status(429)
+          .json(
+            new ApiResponse(
+              429,
+              null,
+              "Too many incorrect OTP attempts. Please request a new OTP.",
+              false
+            )
+          );
+      }
+
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Invalid OTP",
+            false
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 11. Start MongoDB transaction
+    // ----------------------------------------------------------
+
+    let updatedUser;
+    let notification;
+
+    await session.withTransaction(async () => {
+      // --------------------------------------------------------
+      // 12. Get current user
+      // --------------------------------------------------------
+
+      const user = await User.findById(userId)
+        .select("_id name email")
+        .session(session);
+
+      if (!user) {
+        throw new Error("USER_NOT_FOUND");
+      }
+
+      // --------------------------------------------------------
+      // 13. Check if new email is same as current email
+      // --------------------------------------------------------
+
+      if (
+        user.email.toLowerCase() === normalizedEmail
+      ) {
+        throw new Error("SAME_EMAIL");
+      }
+
+      // --------------------------------------------------------
+      // 14. Check if email already belongs to another user
+      // --------------------------------------------------------
+
+      const existingUser = await User.findOne({
+        email: normalizedEmail,
+        _id: { $ne: userId },
+      })
+        .select("_id")
+        .session(session);
+
+      if (existingUser) {
+        throw new Error("EMAIL_ALREADY_EXISTS");
+      }
+
+      // --------------------------------------------------------
+      // 15. Update user's email
+      // --------------------------------------------------------
+
+      user.email = normalizedEmail;
+
+      await user.save({ session });
+
+      updatedUser = user;
+
+      // --------------------------------------------------------
+      // 16. Create notification
+      // --------------------------------------------------------
+
+      notification = await Notification.create(
+        [
+          {
+            user: userId,
+            type: "EMAIL_UPDATED",
+            title: "Email updated successfully",
+            message:
+              "Your FlowDo account email address has been updated successfully.",
+            data: {
+              email: normalizedEmail,
+            },
+          },
+        ],
+        { session }
+      );
+
+      notification = notification[0];
+    });
+
+    // ----------------------------------------------------------
+    // 17. Delete OTP and attempt counter
+    //
+    // OTP cannot be reused after successful verification.
+    // ----------------------------------------------------------
+
+    await Promise.allSettled([
+      deleteCache(otpKey),
+      deleteCache(attemptKey),
+      deleteCache(
+        `update-email-otp:cooldown:${userId}`
+      ),
+    ]);
+
+    // ----------------------------------------------------------
+    // 18. Return success
+    // ----------------------------------------------------------
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          {
+            email: updatedUser.email,
+          },
+          "Email updated successfully",
+          true
+        )
+      );
+  } catch (error) {
+    // ----------------------------------------------------------
+    // Handle known errors
+    // ----------------------------------------------------------
+
+    if (error.message === "USER_NOT_FOUND") {
+      return res
+        .status(404)
+        .json(
+          new ApiResponse(
+            404,
+            null,
+            "User not found",
+            false
+          )
+        );
+    }
+
+    if (error.message === "SAME_EMAIL") {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "This email is already associated with your account",
+            false
+          )
+        );
+    }
+
+    if (error.message === "EMAIL_ALREADY_EXISTS") {
+      return res
+        .status(409)
+        .json(
+          new ApiResponse(
+            409,
+            null,
+            "This email is already registered",
+            false
+          )
+        );
+    }
+
+    console.error(
+      "Verify update email OTP error:",
+      error.message
+    );
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          "Failed to update email",
+          false
+        )
+      );
+  } finally {
+    await session.endSession();
+  }
+};
+
+
 const getUserStats = async (req, res) => {};
 const getUserActivity = async (req, res) => {};
 const getUserNotifications = async (req, res) => {};

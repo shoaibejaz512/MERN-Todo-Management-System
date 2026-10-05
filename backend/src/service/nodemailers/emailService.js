@@ -2,8 +2,8 @@
 import { red } from "colorette";
 import { resetPasswordOtpTemplate } from "./emailTemplates/otpTemplate.email.js";
 import { welcomeTemplate } from "./emailTemplates/welcomeTemplate.email.js";
+import { updateEmailOtp } from "../../utils/chacheKeys.js";
 import transporter from "../../config/nodemailer.config.js";
-
 
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 3000;
@@ -24,8 +24,7 @@ async function sendMailWithRetry(mailOptions, attempt = 1) {
     }
 
     console.error(
-     red( `❌ Email permanently failed after ${MAX_RETRIES} attempts:`,
-      {
+      red(`❌ Email permanently failed after ${MAX_RETRIES} attempts:`, {
         to: mailOptions.to,
         subject: mailOptions.subject,
         error: err.message,
@@ -44,7 +43,7 @@ function buildMailOptions({ to, subject, html }) {
 }
 
 export async function sendWelcomeEmail(user) {
-  const html = welcomeTemplate({ name: user.name});
+  const html = welcomeTemplate({ name: user.name });
   return sendMailWithRetry(
     buildMailOptions({
       to: user.email,
@@ -60,6 +59,17 @@ export async function sendPasswordResetOtp(user, otp) {
     buildMailOptions({
       to: user.email,
       subject: "Your OTP code",
+      html,
+    })
+  );
+}
+
+export async function sendUpdateEmailOtp(user, otp) {
+  const html = updateEmailOtpTemplate({ name: user.name, otp });
+  return sendMailWithRetry(
+    buildMailOptions({
+      to: user.email,
+      subject: "Verify your email address",
       html,
     })
   );

@@ -22,3 +22,5 @@ export const usersKey = (page, limit, search) =>
 export const emailVerificationOtpKey = (email) => `email:otp:${email}`;
 
 export const passwordResetOtpKey = (email) => `password:otp:${email}`;
+
+export const updateEmailOtp = (id) => `email:update:${id}`
