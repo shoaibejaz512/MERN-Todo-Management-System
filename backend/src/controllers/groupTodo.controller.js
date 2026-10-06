@@ -4861,6 +4861,276 @@ const sortGroupTasks = async (req, res) => {
   }
 };
 
+const getGroupTodoTitles = async (req, res) => {
+  try {
+    // ----------------------------------------------------------
+    // 1. Get authenticated user ID
+    // ----------------------------------------------------------
+
+    const userId = req.user?.userId;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    // ----------------------------------------------------------
+    // 2. Validate user ID
+    // ----------------------------------------------------------
+
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid user ID", false));
+    }
+
+    // ----------------------------------------------------------
+    // 3. Create Redis cache key
+    // ----------------------------------------------------------
+
+    const cacheKey = `user:group-todos:${userId}`;
+
+    // ----------------------------------------------------------
+    // 4. Check Redis cache
+    // ----------------------------------------------------------
+
+    try {
+      const cachedTodos = await redisClient.get(cacheKey);
+
+      if (cachedTodos) {
+        return res.status(200).json(
+          new ApiResponse(
+            200,
+            JSON.parse(cachedTodos),
+            "Group todo titles fetched successfully",
+            true
+          )
+        );
+      }
+    } catch (redisError) {
+      // Redis failure should NOT break the API.
+      console.error("Redis GET error:", redisError);
+    }
+
+    // ----------------------------------------------------------
+    // 5. Convert user ID to ObjectId
+    // ----------------------------------------------------------
+
+    const userObjectId = new mongoose.Types.ObjectId(userId);
+
+    // ----------------------------------------------------------
+    // 6. Fetch from MongoDB if cache miss
+    // ----------------------------------------------------------
+
+    const todos = await Todo.find({
+      $or: [
+        {
+          createdBy: userObjectId,
+        },
+        {
+          "participants.user": userObjectId,
+        },
+      ],
+      isDeleted: false,
+      isArchived: false,
+    })
+      .select("_id title status description")
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // ----------------------------------------------------------
+    // 7. Store result in Redis
+    // ----------------------------------------------------------
+
+    try {
+      await redisClient.set(
+        cacheKey,
+        JSON.stringify(todos),
+        "EX",
+        300 // 5 minutes
+      );
+    } catch (redisError) {
+      // Redis failure should NOT break the API.
+      console.error("Redis SET error:", redisError);
+    }
+
+    // ----------------------------------------------------------
+    // 8. Send response
+    // ----------------------------------------------------------
+
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        todos,
+        "Group todo titles fetched successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("getGroupTodoTitles error:", error);
+
+    return res.status(500).json(
+      new ApiResponse(
+        500,
+        null,
+        "Failed to fetch group todo titles",
+        false
+      )
+    );
+  }
+};
+
+
+const filterGroupTodosByTitle = async (req, res) => {
+  try {
+    // ----------------------------------------------------------
+    // 1. Get authenticated user ID
+    // ----------------------------------------------------------
+
+    const userId = req.user?.userId;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    // ----------------------------------------------------------
+    // 2. Validate user ID
+    // ----------------------------------------------------------
+
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid user ID", false));
+    }
+
+    // ----------------------------------------------------------
+    // 3. Get search title
+    // ----------------------------------------------------------
+
+    const title = req.query.title?.trim();
+
+    if (!title) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Title is required", false));
+    }
+
+    if (title.length < 2) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Title search must contain at least 2 characters",
+            false
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 4. Sanitize regex input
+    // ----------------------------------------------------------
+
+    const escapedTitle = title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+    // ----------------------------------------------------------
+    // 5. Create Redis cache key
+    // ----------------------------------------------------------
+
+    const cacheKey = `user:group-todos:search:${userId}:${title.toLowerCase()}`;
+
+    // ----------------------------------------------------------
+    // 6. Check Redis cache
+    // ----------------------------------------------------------
+
+    try {
+      const cachedTodos = await redisClient.get(cacheKey);
+
+      if (cachedTodos) {
+        return res
+          .status(200)
+          .json(
+            new ApiResponse(
+              200,
+              JSON.parse(cachedTodos),
+              "Group todos filtered successfully",
+              true
+            )
+          );
+      }
+    } catch (redisError) {
+      console.error("Redis GET error:", redisError);
+    }
+
+    // ----------------------------------------------------------
+    // 7. Convert user ID to ObjectId
+    // ----------------------------------------------------------
+
+    const userObjectId = new mongoose.Types.ObjectId(userId);
+
+    // ----------------------------------------------------------
+    // 8. Find matching group todos
+    // ----------------------------------------------------------
+
+    const todos = await Todo.find({
+      $or: [
+        {
+          createdBy: userObjectId,
+        },
+        {
+          "participants.user": userObjectId,
+        },
+      ],
+
+      title: {
+        $regex: escapedTitle,
+        $options: "i",
+      },
+
+      isDeleted: false,
+      isArchived: false,
+    })
+      .select("_id title status")
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .lean();
+
+    // ----------------------------------------------------------
+    // 9. Store result in Redis
+    // ----------------------------------------------------------
+
+    try {
+      await redisClient.set(
+        cacheKey,
+        JSON.stringify(todos),
+        "EX",
+        60 // 1 minute
+      );
+    } catch (redisError) {
+      console.error("Redis SET error:", redisError);
+    }
+
+    // ----------------------------------------------------------
+    // 10. Send response
+    // ----------------------------------------------------------
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(200, todos, "Group todos filtered successfully", true)
+      );
+  } catch (error) {
+    console.error("filterGroupTodosByTitle error:", error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Failed to filter group todos", false));
+  }
+};
 export {
   createGroupTodo,
   updateGroupTodo,
@@ -4894,4 +5164,6 @@ export {
   filterGroupTasks,
   getOverdueGroupTasks,
   sortGroupTasks,
+  getGroupTodoTitles,
+  filterGroupTodosByTitle,
 };  
