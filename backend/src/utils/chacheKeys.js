@@ -26,3 +26,9 @@ export const passwordResetOtpKey = (email) => `password:otp:${email}`;
 export const updateEmailOtp = (id) => `email:update:${id}`
 
 export const userStatsKey = (userId) => `user:stats:${userId}`;
+
+export const userActivityKey = (userId,page,limit,type) =>
+  `user:activity:${userId}:` +
+  `page:${page}:` +
+  `limit:${limit}:` +
+  `type:${type}`;

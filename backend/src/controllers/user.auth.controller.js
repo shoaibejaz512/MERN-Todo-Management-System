@@ -1980,7 +1980,191 @@ const getUserStats = async (req, res) => {
       .json(new ApiResponse(500, null, "Failed to fetch user stats", false));
   }
 };
-const getUserActivity = async (req, res) => {};
+
+
+const getUserActivity = async (req, res) => {
+  try {
+    // ----------------------------------------------------------
+    // 1. Get authenticated user ID
+    // ----------------------------------------------------------
+
+    const userId = req.user?.userId;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    // ----------------------------------------------------------
+    // 2. Validate user ID
+    // ----------------------------------------------------------
+
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid user ID", false));
+    }
+
+    const userObjectId = new mongoose.Types.ObjectId(userId);
+
+    // ----------------------------------------------------------
+    // 3. Pagination
+    // ----------------------------------------------------------
+
+    const page = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
+
+    const limit = Math.min(
+      Math.max(Number.parseInt(req.query.limit, 10) || 10, 1),
+      50
+    );
+
+    const skip = (page - 1) * limit;
+
+    // ----------------------------------------------------------
+    // 4. Activity type filter
+    // ----------------------------------------------------------
+
+    const type = req.query.type || "all";
+
+    // ----------------------------------------------------------
+    // 5. Create Redis cache key
+    // ----------------------------------------------------------
+
+    const cacheKey = userActivityKey(userId, page, limit, type);
+
+    // ----------------------------------------------------------
+    // 6. Check Redis cache
+    // ----------------------------------------------------------
+
+    const cachedActivity = await getCache(cacheKey);
+
+    if (cachedActivity) {
+      return res
+        .status(200)
+        .json(
+          new ApiResponse(
+            200,
+            JSON.parse(cachedActivity),
+            "User activities fetched successfully",
+            true
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 7. Get user's group tasks
+    // ----------------------------------------------------------
+
+    const userTasks = await Todo.find({
+      $or: [
+        {
+          createdBy: userObjectId,
+        },
+        {
+          "participants.user": userObjectId,
+        },
+      ],
+
+      isDeleted: false,
+    })
+      .select("_id")
+      .lean();
+
+    const todoIds = userTasks.map((todo) => todo._id);
+
+    // ----------------------------------------------------------
+    // 8. Build activity filter
+    // ----------------------------------------------------------
+
+    const activityFilter = {
+      todo: {
+        $in: todoIds,
+      },
+    };
+
+    if (type !== "all") {
+      activityFilter.type = type;
+    }
+
+    // ----------------------------------------------------------
+    // 9. Fetch activities + total count
+    // ----------------------------------------------------------
+
+    const [activities, total] = await Promise.all([
+      TaskActivity.find(activityFilter)
+        .populate({
+          path: "actor",
+          select: "name profileImage",
+        })
+        .populate({
+          path: "targetUser",
+          select: "name profileImage",
+        })
+        .populate({
+          path: "todo",
+          select: "title",
+        })
+        .sort({
+          createdAt: -1,
+        })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+
+      TaskActivity.countDocuments(activityFilter),
+    ]);
+
+    // ----------------------------------------------------------
+    // 10. Pagination
+    // ----------------------------------------------------------
+
+    const totalPages = Math.ceil(total / limit);
+
+    const result = {
+      activities,
+
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPreviousPage: page > 1,
+      },
+    };
+
+    // ----------------------------------------------------------
+    // 11. Store result in Redis
+    // ----------------------------------------------------------
+
+    await setCache(cacheKey, result, "EX", 30);
+
+    // ----------------------------------------------------------
+    // 12. Send response
+    // ----------------------------------------------------------
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          result,
+          "User activities fetched successfully",
+          true
+        )
+      );
+  } catch (error) {
+    console.error("getUserActivity error:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(500, null, "Failed to fetch user activities", false)
+      );
+  }
+};
+
 const getUserNotifications = async (req, res) => {};
 const getUserSessions = async (req, res) => {};
 const markNotificationAsRead = async (req, res) => {};
