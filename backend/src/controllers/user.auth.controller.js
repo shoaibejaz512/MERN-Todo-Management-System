@@ -1741,7 +1741,245 @@ const verifyUpdateEmailOtp = async (req, res) => {
 };
 
 
-const getUserStats = async (req, res) => {};
+const getUserStats = async (req, res) => {
+  try {
+    const userId = req.user?.userId;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid user ID", false));
+    }
+
+    // ----------------------------------------------------------
+    // 1. Redis cache key
+    // ----------------------------------------------------------
+
+    const cacheKey = userStatsKey(userId);
+
+    // ----------------------------------------------------------
+    // 2. Check Redis
+    // ----------------------------------------------------------
+
+    const cachedStats = await getCache(cacheKey);
+
+    if (cachedStats) {
+      return res
+        .status(200)
+        .json(
+          new ApiResponse(
+            200,
+           cachedStats,
+            "User stats fetched successfully",
+            true
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 3. Cache MISS -> MongoDB
+    // ----------------------------------------------------------
+
+    const userObjectId = new mongoose.Types.ObjectId(userId);
+
+    const [singleTodoStats, groupTodoStats] = await Promise.all([
+      SingleTodo.aggregate([
+        {
+          $match: {
+            createdBy: userObjectId,
+            isDeleted: false,
+            isArchived: false,
+          },
+        },
+        {
+          $group: {
+            _id: null,
+
+            total: { $sum: 1 },
+
+            completed: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "COMPLETED"] }, 1, 0],
+              },
+            },
+
+            pending: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "PENDING"] }, 1, 0],
+              },
+            },
+
+            ongoing: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "ON_GOING"] }, 1, 0],
+              },
+            },
+
+            incomplete: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "IN_COMPLETE"] }, 1, 0],
+              },
+            },
+
+            start: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "START"] }, 1, 0],
+              },
+            },
+          },
+        },
+      ]),
+
+      Todo.aggregate([
+        {
+          $match: {
+            $or: [
+              { createdBy: userObjectId },
+              {
+                "participants.user": userObjectId,
+              },
+            ],
+            isDeleted: false,
+            isArchived: false,
+          },
+        },
+        {
+          $group: {
+            _id: null,
+
+            total: { $sum: 1 },
+
+            completed: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "COMPLETED"] }, 1, 0],
+              },
+            },
+
+            pending: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "PENDING"] }, 1, 0],
+              },
+            },
+
+            ongoing: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "ON_GOING"] }, 1, 0],
+              },
+            },
+
+            incomplete: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "IN_COMPLETE"] }, 1, 0],
+              },
+            },
+
+            start: {
+              $sum: {
+                $cond: [{ $eq: ["$status", "START"] }, 1, 0],
+              },
+            },
+          },
+        },
+      ]),
+    ]);
+
+    // ----------------------------------------------------------
+    // 4. Default values
+    // ----------------------------------------------------------
+
+    const personal = singleTodoStats[0] || {
+      total: 0,
+      completed: 0,
+      pending: 0,
+      ongoing: 0,
+      incomplete: 0,
+      start: 0,
+    };
+
+    const collaborative = groupTodoStats[0] || {
+      total: 0,
+      completed: 0,
+      pending: 0,
+      ongoing: 0,
+      incomplete: 0,
+      start: 0,
+    };
+
+    // ----------------------------------------------------------
+    // 5. Overall stats
+    // ----------------------------------------------------------
+
+    const totalTasks = personal.total + collaborative.total;
+
+    const completedTasks = personal.completed + collaborative.completed;
+
+    const pendingTasks = personal.pending + collaborative.pending;
+
+    const ongoingTasks = personal.ongoing + collaborative.ongoing;
+
+    const incompleteTasks = personal.incomplete + collaborative.incomplete;
+
+    const startTasks = personal.start + collaborative.start;
+
+    const completionPercentage =
+      totalTasks === 0
+        ? 0
+        : Number(((completedTasks / totalTasks) * 100).toFixed(2));
+
+    // ----------------------------------------------------------
+    // 6. Prepare stats
+    // ----------------------------------------------------------
+
+    const stats = {
+      overview: {
+        totalTasks,
+        completedTasks,
+        pendingTasks,
+        ongoingTasks,
+        incompleteTasks,
+        startTasks,
+        completionPercentage,
+      },
+
+      personal,
+
+      collaborative,
+    };
+
+    // ----------------------------------------------------------
+    // 7. Store in Redis
+    // ----------------------------------------------------------
+
+    await setCache(
+      cacheKey,
+      stats,
+      "EX",
+      300 // 5 minutes
+    );
+
+    // ----------------------------------------------------------
+    // 8. Response
+    // ----------------------------------------------------------
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(200, stats, "User stats fetched successfully", true)
+      );
+  } catch (error) {
+    console.error("getUserStats error:", error);
+
+    return res
+      .status(500)
+      .json(new ApiResponse(500, null, "Failed to fetch user stats", false));
+  }
+};
 const getUserActivity = async (req, res) => {};
 const getUserNotifications = async (req, res) => {};
 const getUserSessions = async (req, res) => {};
@@ -1766,6 +2004,16 @@ export {
   searchUser,
   generateEmailVerificationOtp,
   verifyEmail,
+  generateUpdateEmailOtp,
+  verifyUpdateEmailOtp,
+  getUserStats,
+  getUserActivity,
+  getUserNotifications,
+  getUserSessions,
+  markNotificationAsRead,
+  markAllNotificationsAsRead,
+  resendEmailVerificationOTP,
+
 };
 
 // verifyEmail;✅✅✅✅

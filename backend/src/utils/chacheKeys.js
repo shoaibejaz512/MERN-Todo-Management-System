@@ -24,3 +24,5 @@ export const emailVerificationOtpKey = (email) => `email:otp:${email}`;
 export const passwordResetOtpKey = (email) => `password:otp:${email}`;
 
 export const updateEmailOtp = (id) => `email:update:${id}`
+
+export const userStatsKey = (userId) => `user:stats:${userId}`;
