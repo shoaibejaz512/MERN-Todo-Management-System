@@ -12,6 +12,7 @@ import { setAuthCookies } from "../utils/setAuthCookies.js";
 import { uploadToCloudinary } from "../utils/fileupload.js";
 import jwt from "jsonwebtoken";
 import { clearAuthCookies } from "../utils/clearAuthCookies.js";
+import Session from "../models/user.session.model.js";
 import {
   getCache,
   setCache,
@@ -86,104 +87,404 @@ const registerUser = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
+
+// ==========================================================
+// LOGIN USER
+// ==========================================================
+
 const loginUser = async (req, res) => {
-  const { email, password } = req.body;
   try {
-    //validate the input exist or not
+    // ----------------------------------------------------------
+    // 1. Get login credentials
+    // ----------------------------------------------------------
+
+    const { email, password } = req.body;
+
+    // ----------------------------------------------------------
+    // 2. Validate input
+    // ----------------------------------------------------------
+
     if (!email || !password) {
       return res
         .status(400)
-        .json(new ApiResponse(400, null, "all fields are required", false));
-    }
-
-    //STEP:1 EMAIL VERIFICATION
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res
-        .status(404)
         .json(
-          new ApiResponse(404, null, "Email or password is incorrect", false)
+          new ApiResponse(
+            400,
+            null,
+            "Email and password are required",
+            false
+          )
         );
     }
 
-    //STEP:2 PASSWORD VERIFICATION
-    let checkPassword = await bcrypt.compare(password, user.password);
-    if (!checkPassword) {
+    // ----------------------------------------------------------
+    // 3. Normalize email
+    // ----------------------------------------------------------
+
+    const normalizedEmail = email
+      .toLowerCase()
+      .trim();
+
+    // ----------------------------------------------------------
+    // 4. Find user
+    // ----------------------------------------------------------
+
+    const user = await User.findOne({
+      email: normalizedEmail,
+    });
+
+    if (!user) {
       return res
         .status(401)
         .json(
-          new ApiResponse(401, null, "Email or password is incorrect", false)
+          new ApiResponse(
+            401,
+            null,
+            "Email or password is incorrect",
+            false
+          )
         );
     }
 
-    //STEP:3 GENERATE TOKENS
-    const access_token = signAccessToken(user);
-    const refres_token = signRefreshToken(user);
-    user.refreshTokens.push({
-      token: refres_token,
-      userAgent: req.headers["user-agent"],
-      ip: req.ip,
-      createdAt: new Date(),
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-    });
-    await user.save();
+    // ----------------------------------------------------------
+    // 5. Verify password
+    // ----------------------------------------------------------
 
-    const loggedInUser = await User.findById(user._id).select(
-      "-password -refreshToken"
+    const isPasswordCorrect =
+      await bcrypt.compare(
+        password,
+        user.password
+      );
+
+    if (!isPasswordCorrect) {
+      return res
+        .status(401)
+        .json(
+          new ApiResponse(
+            401,
+            null,
+            "Email or password is incorrect",
+            false
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 6. Check user ID
+    // ----------------------------------------------------------
+
+    if (
+      !mongoose.Types.ObjectId.isValid(
+        user._id
+      )
+    ) {
+      return res
+        .status(500)
+        .json(
+          new ApiResponse(
+            500,
+            null,
+            "Invalid user account",
+            false
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 7. Get request/device information
+    // ----------------------------------------------------------
+
+    const userAgent =
+      req.get("user-agent") || "Unknown";
+
+    const ipAddress =
+      req.ip || "Unknown";
+
+    // ----------------------------------------------------------
+    // 8. Session expiration
+    // ----------------------------------------------------------
+    // Refresh token lifetime = 7 days
+    // ----------------------------------------------------------
+
+    const expiresAt = new Date(
+      Date.now() +
+        7 * 24 * 60 * 60 * 1000
     );
 
-    //set tokens to cookie
-    setAuthCookies(res, access_token, refres_token);
+    // ----------------------------------------------------------
+    // 9. Create Session
+    // ----------------------------------------------------------
+    // We create the session FIRST because the session._id
+    // will be included inside the JWT payload.
+    // ----------------------------------------------------------
 
-    //send successfull response to the user ✅✅
-    console.log(green("User Login successfully"));
+    const session = new Session({
+      user: user._id,
+
+      device: "Unknown Device",
+
+      browser: "Unknown Browser",
+
+      os: "Unknown OS",
+
+      ipAddress,
+
+      userAgent,
+
+      createdAt: new Date(),
+
+      lastActiveAt: new Date(),
+
+      expiresAt,
+    });
+
+    // ----------------------------------------------------------
+    // 10. Generate Access Token
+    // ----------------------------------------------------------
+    // Payload:
+    //
+    // {
+    //   userId,
+    //   sessionId
+    // }
+    // ----------------------------------------------------------
+
+    const accessToken =
+      signAccessToken(
+        user,
+        session._id
+      );
+
+    // ----------------------------------------------------------
+    // 11. Generate Refresh Token
+    // ----------------------------------------------------------
+
+    const refreshToken =
+      signRefreshToken(
+        user,
+        session._id
+      );
+
+    // ----------------------------------------------------------
+    // 12. Hash Refresh Token
+    // ----------------------------------------------------------
+    // NEVER store the raw refresh token in MongoDB.
+    // ----------------------------------------------------------
+
+    const refreshTokenHash =
+      crypto
+        .createHash("sha256")
+        .update(refreshToken)
+        .digest("hex");
+
+    // ----------------------------------------------------------
+    // 13. Store refresh token hash inside Session
+    // ----------------------------------------------------------
+
+    session.refreshTokenHash =
+      refreshTokenHash;
+
+    // ----------------------------------------------------------
+    // 14. Save Session
+    // ----------------------------------------------------------
+
+    await session.save();
+
+    // ----------------------------------------------------------
+    // 15. Get safe user information
+    // ----------------------------------------------------------
+    // Don't return password or refresh token information.
+    // ----------------------------------------------------------
+
+    const loggedInUser =
+      await User.findById(user._id)
+        .select(
+          "-password -refreshTokens"
+        )
+        .lean();
+
+    // ----------------------------------------------------------
+    // 16. Set authentication cookies
+    // ----------------------------------------------------------
+
+    setAuthCookies(
+      res,
+      accessToken,
+      refreshToken
+    );
+
+    // ----------------------------------------------------------
+    // 17. Success response
+    // ----------------------------------------------------------
+
+    console.log(
+      green(
+        `User login successful: ${user._id}`
+      )
+    );
+
     return res
       .status(200)
       .json(
-        new ApiResponse(200, loggedInUser, "User Login successfully", true)
+        new ApiResponse(
+          200,
+          loggedInUser,
+          "User login successful",
+          true
+        )
       );
-  } catch (error) {
-    console.log(red(`User Login failed: ${error.message}`));
-    return res
-      .status(500)
-      .json(new ApiResponse(500, null, error.message, false));
-  }
-};
-const logoutUser = async (req, res) => {
-  try {
-    const user = await User.findByIdAndUpdate(req.user.userId, {
-      new: true,
-    });
 
-    user.refreshTokens = user.refreshTokens.filter(
-      (session) => session.token !== req.cookies.refreshToken
+  } catch (error) {
+
+    // ----------------------------------------------------------
+    // Error handling
+    // ----------------------------------------------------------
+
+    console.log(
+      red(
+        `User login failed: ${error.message}`
+      )
     );
 
-    await user.save();
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          "Login failed",
+          false
+        )
+      );
+  }
+};
+
+// ==========================================================
+// LOGOUT USER
+// ==========================================================
+
+const logoutUser = async (req, res) => {
+  try {
+    // ----------------------------------------------------------
+    // 1. Get authenticated user information
+    // ----------------------------------------------------------
+
+    const userId = req.user?.userId;
+    const sessionId = req.user?.sessionId;
+
+    // ----------------------------------------------------------
+    // 2. Validate authentication data
+    // ----------------------------------------------------------
+
+    if (!userId || !sessionId) {
+      return res
+        .status(401)
+        .json(
+          new ApiResponse(
+            401,
+            null,
+            "Authentication session is required",
+            false
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 3. Validate MongoDB ObjectIds
+    // ----------------------------------------------------------
+
+    if (
+      !mongoose.Types.ObjectId.isValid(userId) ||
+      !mongoose.Types.ObjectId.isValid(sessionId)
+    ) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "Invalid authentication session", false)
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 4. Revoke current session
+    // ----------------------------------------------------------
+    // We use both user + session ID so a user cannot revoke
+    // another user's session.
+    // ----------------------------------------------------------
+
+    const revokedSession = await Session.findOneAndUpdate(
+      {
+        _id: sessionId,
+        user: userId,
+        revokedAt: null,
+      },
+      {
+        $set: {
+          revokedAt: new Date(),
+        },
+      },
+      {
+        new: true,
+      }
+    );
+
+    // ----------------------------------------------------------
+    // 5. Clear authentication cookies
+    // ----------------------------------------------------------
+    // Cookie options should match the options used when
+    // creating the cookies.
+    // ----------------------------------------------------------
 
     res.clearCookie("accessToken", {
       httpOnly: true,
-      secure: false,
+      secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
     });
 
     res.clearCookie("refreshToken", {
       httpOnly: true,
-      secure: false,
+      secure: process.env.NODE_ENV === "production",
       sameSite: "strict",
     });
+
+    // ----------------------------------------------------------
+    // 6. Session already revoked / expired
+    // ----------------------------------------------------------
+    // Even if the session doesn't exist, clearing the cookies
+    // makes the client logged out.
+    // ----------------------------------------------------------
+
+    if (!revokedSession) {
+      console.log(
+        green(`Logout completed — session already inactive: ${sessionId}`)
+      );
+
+      return res
+        .status(200)
+        .json(new ApiResponse(200, null, "User logged out successfully", true));
+    }
+
+    // ----------------------------------------------------------
+    // 7. Successful logout
+    // ----------------------------------------------------------
+
+    console.log(green(`User logged out successfully: ${userId}`));
 
     return res
       .status(200)
       .json(new ApiResponse(200, null, "User logged out successfully", true));
   } catch (error) {
+    // ----------------------------------------------------------
+    // 8. Error handling
+    // ----------------------------------------------------------
+
     console.error(red(`Logout failed: ${error.message}`));
 
     return res
       .status(500)
-      .json(new ApiResponse(500, null, "Internal server error", false));
+      .json(new ApiResponse(500, null, "Failed to logout user", false));
   }
 };
+
 const sendPasswordResetOTP = async (req, res) => {
   const { email } = req.body;
   try {
@@ -2307,7 +2608,101 @@ const getUserNotifications = async (req, res) => {
       );
   }
 };
-const getUserSessions = async (req, res) => {};
+
+const getUserSessions = async (req, res) => {
+  try {
+    // ----------------------------------------------------------
+    // 1. Get authenticated user ID
+    // ----------------------------------------------------------
+
+    const userId = req.user?.userId;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    // ----------------------------------------------------------
+    // 2. Validate user ID
+    // ----------------------------------------------------------
+
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid user id", false));
+    }
+
+    // ----------------------------------------------------------
+    // 3. Get active sessions
+    // ----------------------------------------------------------
+
+    const sessions = await Session.find({
+      user: userId,
+      expiresAt: { $gt: new Date() },
+    })
+      .select(
+        "_id device browser os ipAddress userAgent createdAt lastActiveAt expiresAt"
+      )
+      .sort({
+        lastActiveAt: -1,
+      })
+      .lean();
+
+    // ----------------------------------------------------------
+    // 4. No active sessions
+    // ----------------------------------------------------------
+
+    if (sessions.length === 0) {
+      return res
+        .status(200)
+        .json(new ApiResponse(200, [], "No active sessions found", true));
+    }
+
+    // ----------------------------------------------------------
+    // 5. Mark current session
+    // ----------------------------------------------------------
+
+    const currentSessionId = req.user?.sessionId;
+
+    const formattedSessions = sessions.map((session) => ({
+      id: session._id,
+      device: session.device,
+      browser: session.browser,
+      os: session.os,
+      ipAddress: session.ipAddress,
+      userAgent: session.userAgent,
+      createdAt: session.createdAt,
+      lastActiveAt: session.lastActiveAt,
+      expiresAt: session.expiresAt,
+      isCurrent:
+        currentSessionId && session._id.toString() === currentSessionId,
+    }));
+
+    // ----------------------------------------------------------
+    // 6. Send response
+    // ----------------------------------------------------------
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          formattedSessions,
+          "User sessions retrieved successfully",
+          true
+        )
+      );
+  } catch (error) {
+    console.error("Get user sessions error:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(500, null, "Failed to retrieve user sessions", false)
+      );
+  }
+};
 const markNotificationAsRead = async (req, res) => {};
 const markAllNotificationsAsRead = async (req, res) => {};
 const resendEmailVerificationOTP = async (req, res) => {};
