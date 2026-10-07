@@ -32,3 +32,5 @@ export const userActivityKey = (userId,page,limit,type) =>
   `page:${page}:` +
   `limit:${limit}:` +
   `type:${type}`;
+
+export const userNotificationKey = (userId,page,limit) => `user:notifications:${userId}:${page}:${limit}`

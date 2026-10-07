@@ -17,7 +17,7 @@ import {
   setCache,
   deleteCache,
 } from "../service/redis/redis.service.js";
-import { emailVerificationOtpKey, updateEmailOtp, userKey, usersKey } from "../utils/chacheKeys.js";
+import { emailVerificationOtpKey, updateEmailOtp, userKey, userNotificationKey, usersKey } from "../utils/chacheKeys.js";
 import { deleteFromCloudinary } from "../service/cloudinary.service.js";
 import mongoose from "mongoose";
 import crypto from "crypto";
@@ -2165,7 +2165,148 @@ const getUserActivity = async (req, res) => {
   }
 };
 
-const getUserNotifications = async (req, res) => {};
+const getUserNotifications = async (req, res) => {
+  try {
+    // ----------------------------------------------------------
+    // 1. Get authenticated user ID
+    // ----------------------------------------------------------
+
+    const userId = req.user?.userId;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    // ----------------------------------------------------------
+    // 2. Validate user ID
+    // ----------------------------------------------------------
+
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid user id", false));
+    }
+
+    // ----------------------------------------------------------
+    // 3. Parse and validate pagination
+    // ----------------------------------------------------------
+
+    const page = Math.max(Number.parseInt(req.query.page, 10) || 1, 1);
+
+    const limit = Math.min(
+      Math.max(Number.parseInt(req.query.limit, 10) || 10, 1),
+      50
+    );
+
+    const skip = (page - 1) * limit;
+
+    // ----------------------------------------------------------
+    // 4. Generate Redis cache key
+    // ----------------------------------------------------------
+
+    const cacheKey = userNotificationKey(userId, page, limit);
+
+    // ----------------------------------------------------------
+    // 5. Check Redis cache
+    // ----------------------------------------------------------
+
+    let cachedNotifications = null;
+
+    try {
+      cachedNotifications = await getCache(cacheKey);
+    } catch (redisError) {
+      // Redis failure should not break the API.
+      console.error(
+        "Redis notification cache read failed:",
+        redisError.message
+      );
+    }
+
+    if (cachedNotifications) {
+      return res
+        .status(200)
+        .json(
+          new ApiResponse(
+            200,
+            cachedNotifications,
+            "Notifications retrieved successfully",
+            true
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 6. Fetch notifications and total count in parallel
+    // ----------------------------------------------------------
+
+    const [notifications, totalNotifications] = await Promise.all([
+      Notification.find({
+        user: userId,
+      })
+        .sort({ createdAt: -1, _id: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+
+      Notification.countDocuments({
+        user: userId,
+      }),
+    ]);
+
+    // ----------------------------------------------------------
+    // 7. Calculate pagination metadata
+    // ----------------------------------------------------------
+
+    const totalPages = Math.ceil(totalNotifications / limit);
+
+    const data = {
+      notifications,
+
+      pagination: {
+        currentPage: page,
+        limit,
+        totalNotifications,
+        totalPages,
+        hasNextPage: page < totalPages,
+        hasPreviousPage: page > 1,
+      },
+    };
+
+    // ----------------------------------------------------------
+    // 8. Store fresh data in Redis
+    // ----------------------------------------------------------
+
+    try {
+      await setCache(cacheKey, data, 600);
+    } catch (redisError) {
+      // Redis failure should not affect successful DB response.
+      console.error(
+        "Redis notification cache write failed:",
+        redisError.message
+      );
+    }
+
+    // ----------------------------------------------------------
+    // 9. Send response
+    // ----------------------------------------------------------
+
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(200, data, "Notifications retrieved successfully", true)
+      );
+  } catch (error) {
+    console.error("Get user notifications error:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(500, null, "Failed to retrieve notifications", false)
+      );
+  }
+};
 const getUserSessions = async (req, res) => {};
 const markNotificationAsRead = async (req, res) => {};
 const markAllNotificationsAsRead = async (req, res) => {};
