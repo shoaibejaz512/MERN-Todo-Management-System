@@ -2703,8 +2703,143 @@ const getUserSessions = async (req, res) => {
       );
   }
 };
-const markNotificationAsRead = async (req, res) => {};
-const markAllNotificationsAsRead = async (req, res) => {};
+const markNotificationAsRead = async (req, res) => {
+  try {
+    // ----------------------------------------------------------
+    // 1. Get authenticated user ID
+    // ----------------------------------------------------------
+    const userId = req.user?.userId;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    // ----------------------------------------------------------
+    // 2. Get notification ID
+    // ----------------------------------------------------------
+    const { notificationId } = req.params;
+
+    if (!notificationId) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Notification ID is required", false));
+    }
+
+    // ----------------------------------------------------------
+    // 3. Find notification belonging to authenticated user
+    // ----------------------------------------------------------
+    const notification = await Notification.findOne({
+      _id: notificationId,
+      user: userId,
+    });
+
+    if (!notification) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "Notification not found", false));
+    }
+
+    // ----------------------------------------------------------
+    // 4. Already read
+    // ----------------------------------------------------------
+    if (notification.isRead) {
+      return res
+        .status(200)
+        .json(
+          new ApiResponse(
+            200,
+            notification,
+            "Notification is already marked as read",
+            true
+          )
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 5. Mark notification as read
+    // ----------------------------------------------------------
+    notification.isRead = true;
+
+    await notification.save();
+
+    // ----------------------------------------------------------
+    // 6. Return updated notification
+    // ----------------------------------------------------------
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(200, notification, "Notification marked as read", true)
+      );
+  } catch (error) {
+    console.error("markNotificationAsRead error:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(500, null, "Failed to mark notification as read", false)
+      );
+  }
+};
+const markAllNotificationsAsRead = async (req, res) => {
+  try {
+    // ----------------------------------------------------------
+    // 1. Get authenticated user ID
+    // ----------------------------------------------------------
+    const userId = req.user?.userId;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    // ----------------------------------------------------------
+    // 2. Mark all unread notifications as read
+    // ----------------------------------------------------------
+    const result = await Notification.updateMany(
+      {
+        user: userId,
+        isRead: false,
+      },
+      {
+        $set: {
+          isRead: true,
+        },
+      }
+    );
+
+    // ----------------------------------------------------------
+    // 3. Return response
+    // ----------------------------------------------------------
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          modifiedCount: result.modifiedCount,
+        },
+        result.modifiedCount > 0
+          ? "All notifications marked as read"
+          : "No unread notifications found",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("markAllNotificationsAsRead error:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          "Failed to mark all notifications as read",
+          false
+        )
+      );
+  }
+};
 const resendEmailVerificationOTP = async (req, res) => {};
 
 export {
@@ -2735,21 +2870,3 @@ export {
   resendEmailVerificationOTP,
 
 };
-
-// verifyEmail;✅✅✅✅
-// updateEmail;
-// getUserStats;
-// Total Tasks
-// Completed Tasks
-// Pending Tasks
-// Overdue Tasks
-// Collaborative Tasks
-// Created Tasks
-// getUserActivity;
-// getUserNotifications;
-// getUserInvitations;
-// getUserSessions;
-// deactivateMyAccount;
-// 2. resendEmailVerificationOTP
-// 4. markNotificationAsRead
-// 5. markAllNotificationsAsRead
