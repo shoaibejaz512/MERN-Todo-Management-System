@@ -2,8 +2,9 @@
 import { red } from "colorette";
 import { resetPasswordOtpTemplate } from "./emailTemplates/otpTemplate.email.js";
 import { welcomeTemplate } from "./emailTemplates/welcomeTemplate.email.js";
-import { updateEmailOtp } from "../../utils/chacheKeys.js";
+import { emailVerificationOtpTemplate } from "./emailTemplates/emailVerificationOtpTemplate.email.js";
 import transporter from "../../config/nodemailer.config.js";
+import { updateEmailOtpTemplate } from "./emailTemplates/updateEmailOtpTemplate.email.js";
 
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 3000;
@@ -70,6 +71,21 @@ export async function sendUpdateEmailOtp(user, otp) {
     buildMailOptions({
       to: user.email,
       subject: "Verify your email address",
+      html,
+    })
+  );
+}
+
+export async function sendEmailVerificationOtp(user, otp) {
+  const html = emailVerificationOtpTemplate({
+    name: user.name,
+    otp,
+  });
+
+  return sendMailWithRetry(
+    buildMailOptions({
+      to: user.email,
+      subject: "Verify your FlowDo email",
       html,
     })
   );

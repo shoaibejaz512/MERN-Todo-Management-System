@@ -2840,8 +2840,129 @@ const markAllNotificationsAsRead = async (req, res) => {
       );
   }
 };
-const resendEmailVerificationOTP = async (req, res) => {};
+const resendEmailVerificationOTP = async (req, res) => {
+  try {
+    // ----------------------------------------------------------
+    // 1. Get authenticated user ID
+    // ----------------------------------------------------------
+    const userId = req.user?.userId;
 
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    // ----------------------------------------------------------
+    // 2. Find user
+    // ----------------------------------------------------------
+    const user = await User.findById(userId).select(
+      "_id email name isVerified"
+    );
+
+    if (!user) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
+    }
+
+    // ----------------------------------------------------------
+    // 3. Check if email is already verified
+    // ----------------------------------------------------------
+    if (user.isVerified) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "Your email is already verified", false)
+        );
+    }
+
+    // ----------------------------------------------------------
+    // 4. Redis keys
+    // ----------------------------------------------------------
+    const otpKey = emailVerificationOtpKey(userId);
+
+    const resendCooldownKey = `emailVerificationResendCooldown:${userId}`;
+
+    // ----------------------------------------------------------
+    // 5. Prevent OTP resend spam
+    // ----------------------------------------------------------
+    const cooldownCreated = await redisClient.set(resendCooldownKey, "1", {
+      NX: true,
+      EX: 60,
+    });
+
+    if (!cooldownCreated) {
+      const ttl = await redisClient.ttl(resendCooldownKey);
+
+      return res.status(429).json(
+        new ApiResponse(
+          429,
+          {
+            retryAfter: ttl,
+          },
+          `Please wait ${ttl} seconds before requesting another OTP`,
+          false
+        )
+      );
+    }
+
+    // ----------------------------------------------------------
+    // 6. Generate secure 6-digit OTP
+    // ----------------------------------------------------------
+    const otp = crypto.randomInt(100000, 1000000).toString();
+
+    // ----------------------------------------------------------
+    // 7. Send verification email
+    // ----------------------------------------------------------
+    try {
+      await sendEmailVerificationOtp(user, otp);
+    } catch (emailError) {
+      // --------------------------------------------------------
+      // Email failed — remove cooldown so user can retry
+      // --------------------------------------------------------
+      await redisClient.del(resendCooldownKey);
+
+      throw emailError;
+    }
+
+    // ----------------------------------------------------------
+    // 8. Store OTP in Redis
+    // OTP expires after 5 minutes
+    // ----------------------------------------------------------
+    await redisClient.set(otpKey, otp, {
+      EX: 300,
+    });
+
+    // ----------------------------------------------------------
+    // 9. Success response
+    // ----------------------------------------------------------
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          expiresIn: 300,
+          resendAfter: 60,
+        },
+        "A new verification OTP has been sent to your email",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("resendEmailVerificationOTP error:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          "Failed to resend email verification OTP",
+          false
+        )
+      );
+  }
+};
 export {
   registerUser,
   loginUser,
@@ -2868,5 +2989,4 @@ export {
   markNotificationAsRead,
   markAllNotificationsAsRead,
   resendEmailVerificationOTP,
-
 };
