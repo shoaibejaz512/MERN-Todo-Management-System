@@ -18,7 +18,7 @@ import {
   setCache,
   deleteCache,
 } from "../service/redis/redis.service.js";
-import { emailVerificationOtpKey, updateEmailOtp, userKey, userNotificationKey, usersKey } from "../utils/chacheKeys.js";
+import { emailVerificationOtpKey, passwordResetOtpKey, updateEmailOtp, userKey, userNotificationKey, usersKey } from "../utils/chacheKeys.js";
 import { deleteFromCloudinary } from "../service/cloudinary.service.js";
 import mongoose from "mongoose";
 import crypto from "crypto";
@@ -486,48 +486,104 @@ const logoutUser = async (req, res) => {
 };
 
 const sendPasswordResetOTP = async (req, res) => {
-  const { email } = req.body;
+  const genericMessage =
+    "If an account exists with this email, password reset instructions will be sent.";
+
   try {
-    if (!email)
+    // 1. Validate and normalize email
+    const email = req.body?.email;
+
+    if (typeof email !== "string" || !email.trim()) {
       return res
         .status(400)
-        .json(new ApiResponse(403, null, "email is required", false));
-    //STEP:1 FIND USER
-    const user = await User.findOne({ email });
-    //STEP:2 VALIDATE USER
-    if (!user) {
-      return res
-        .status(404)
-        .json(new ApiResponse(401, null, "Unauthorized", false));
+        .json(
+          new ApiResponse(400, null, "Valid email is required", false)
+        );
     }
 
-    //STEP:3 GENERATE OTP
-    const passwordResetOTP = Math.floor(
-      100000 + Math.random() * 900000
-    ).toString();
-    const hashedPasswordResetOTP = await bcrypt.hash(passwordResetOTP, 10);
-    user.passwordResetToken = hashedPasswordResetOTP;
-    user.passwordResetTokenExpires = new Date(Date.now() + 30 * 60 * 1000);
-    await user.save();
+    const normalizedEmail = email.trim().toLowerCase();
 
-    //STEP:4 SEND OTP TO THE USER EMAIL
-    sendPasswordResetOtp(user, passwordResetOTP);
+    // 2. Find user
+    const user = await User.findOne({
+      email: normalizedEmail,
+    }).select("_id name email");
 
-    //STEP:5 SEND DATA TO THE USER JSON
+    // 3. Avoid exposing whether an account exists
+    if (!user) {
+      return res
+        .status(200)
+        .json(new ApiResponse(200, null, genericMessage, true));
+    }
+
+    const emailKey = user.email.toLowerCase();
+    const otpKey = passwordResetOtpKey(emailKey);
+    const cooldownKey = `password:cooldown:${emailKey}`;
+
+    // 4. Prevent repeated OTP requests (60-second cooldown)
+    const cooldown = await setCache(cooldownKey, "1", {
+      EX: 60,
+      NX: true,
+    });
+
+    if (cooldown !== "OK") {
+      return res
+        .status(429)
+        .json(
+          new ApiResponse(
+            429,
+            null,
+            "Please wait before requesting another OTP",
+            false
+          )
+        );
+    }
+
+    // 5. Generate cryptographically secure OTP
+    const passwordResetOTP = crypto
+      .randomInt(100000, 1000000)
+      .toString();
+
+    // 6. Hash OTP
+    const hashedOTP = await bcrypt.hash(passwordResetOTP, 10);
+
+    // 7. Store OTP hash in Redis for 5 minutes
+    await setCache(otpKey, hashedOTP, {
+      EX: 300,
+    });
+
+    // 8. Send OTP email
+    try {
+      await sendPasswordResetOtp(user, passwordResetOTP);
+    } catch (emailError) {
+      await deleteCache(otpKey);
+
+      console.error(
+        "Password reset email failed:",
+        emailError.message
+      );
+
+      return res
+        .status(200)
+        .json(new ApiResponse(200, null, genericMessage, true));
+    }
+
+    // 9. Send safe response
     return res
       .status(200)
-      .json(
-        new ApiResponse(
-          200,
-          user.name,
-          "Password reset OTP SEND ON EMAIL",
-          true
-        )
-      );
+      .json(new ApiResponse(200, null, genericMessage, true));
   } catch (error) {
+    console.error("sendPasswordResetOTP error:", error.message);
+
     return res
       .status(500)
-      .json(new ApiResponse(500, null, error.message, false));
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          "Unable to process your password reset request",
+          false
+        )
+      );
   }
 };
 const verifyPasswordResetOtp = async (req, res) => {
