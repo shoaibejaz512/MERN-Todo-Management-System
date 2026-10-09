@@ -23,14 +23,21 @@ export const emailVerificationOtpKey = (email) => `email:otp:${email}`;
 
 export const passwordResetOtpKey = (email) => `password:otp:${email}`;
 
-export const updateEmailOtp = (id) => `email:update:${id}`
+export const updateEmailOtp = (id) => `email:update:${id}`;
 
 export const userStatsKey = (userId) => `user:stats:${userId}`;
 
-export const userActivityKey = (userId,page,limit,type) =>
+export const userActivityKey = (userId, page, limit, type) =>
   `user:activity:${userId}:` +
   `page:${page}:` +
   `limit:${limit}:` +
   `type:${type}`;
 
-export const userNotificationKey = (userId,page,limit) => `user:notifications:${userId}:${page}:${limit}`
+export const userNotificationKey = (userId, page, limit) =>
+  `user:notifications:${userId}:${page}:${limit}`;
+
+export const userNotificationVersionKey = (userId) =>
+  `user:notifications:version:${userId}`;
+
+export const userNotificationVersionedKey = (userId, page, limit, version) =>
+  `user:notifications:${userId}:v${version}:page:${page}:limit:${limit}`;

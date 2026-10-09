@@ -2745,9 +2745,7 @@ const getUserSessions = async (req, res) => {
 
 const markNotificationAsRead = async (req, res) => {
   try {
-    // ----------------------------------------------------------
-    // 1. Get authenticated user ID
-    // ----------------------------------------------------------
+    // 1. Validate authenticated user
     const userId = req.user?.userId;
 
     if (!userId) {
@@ -2756,24 +2754,38 @@ const markNotificationAsRead = async (req, res) => {
         .json(new ApiResponse(401, null, "Unauthorized", false));
     }
 
-    // ----------------------------------------------------------
-    // 2. Get notification ID
-    // ----------------------------------------------------------
-    const { notificationId } = req.params;
-
-    if (!notificationId) {
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
       return res
         .status(400)
-        .json(new ApiResponse(400, null, "Notification ID is required", false));
+        .json(new ApiResponse(400, null, "Invalid user ID", false));
     }
 
-    // ----------------------------------------------------------
-    // 3. Find notification belonging to authenticated user
-    // ----------------------------------------------------------
-    const notification = await Notification.findOne({
-      _id: notificationId,
-      user: userId,
-    });
+    // 2. Validate notification ID
+    const { notificationId } = req.params;
+
+    if (!notificationId || !mongoose.Types.ObjectId.isValid(notificationId)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "Valid notification ID is required", false)
+        );
+    }
+
+    // 3. Atomically mark the user's notification as read
+    // Ownership is enforced in the query itself.
+    const notification = await Notification.findOneAndUpdate(
+      {
+        _id: notificationId,
+        user: userId,
+      },
+      {
+        $set: { isRead: true },
+      },
+      {
+        new: true,
+        runValidators: true,
+      }
+    ).lean();
 
     if (!notification) {
       return res
@@ -2781,39 +2793,35 @@ const markNotificationAsRead = async (req, res) => {
         .json(new ApiResponse(404, null, "Notification not found", false));
     }
 
-    // ----------------------------------------------------------
-    // 4. Already read
-    // ----------------------------------------------------------
-    if (notification.isRead) {
-      return res
-        .status(200)
-        .json(
-          new ApiResponse(
-            200,
-            notification,
-            "Notification is already marked as read",
-            true
-          )
-        );
+    // 4. Invalidate notification-list caches by advancing the version.
+    // The notification list controller must use the same version key.
+    try {
+      const versionKey = userNotificationVersionKey(userId);
+
+      // Redis INCR is atomic. Initialize the version if it doesn't exist.
+      await redisClient.incr(versionKey);
+
+      // Keep the version key available; adjust TTL to your cache policy.
+      await redisClient.expire(versionKey, 60 * 60 * 24 * 30);
+    } catch (cacheError) {
+      // The database update succeeded, but stale cached pages may remain.
+      console.error(
+        "Notification cache invalidation failed:",
+        cacheError.message
+      );
+
+      // In production, use a retry/outbox strategy if cache consistency
+      // must be guaranteed during Redis outages.
     }
 
-    // ----------------------------------------------------------
-    // 5. Mark notification as read
-    // ----------------------------------------------------------
-    notification.isRead = true;
-
-    await notification.save();
-
-    // ----------------------------------------------------------
-    // 6. Return updated notification
-    // ----------------------------------------------------------
+    // 5. Return updated notification
     return res
       .status(200)
       .json(
         new ApiResponse(200, notification, "Notification marked as read", true)
       );
   } catch (error) {
-    console.error("markNotificationAsRead error:", error);
+    console.error("markNotificationAsRead error:", error.message);
 
     return res
       .status(500)
@@ -2822,37 +2830,54 @@ const markNotificationAsRead = async (req, res) => {
       );
   }
 };
+
 const markAllNotificationsAsRead = async (req, res) => {
   try {
-    // ----------------------------------------------------------
-    // 1. Get authenticated user ID
-    // ----------------------------------------------------------
+    // 1. Validate authenticated user
     const userId = req.user?.userId;
 
     if (!userId) {
-      return res
-        .status(401)
-        .json(new ApiResponse(401, null, "Unauthorized", false));
+      return res.status(401).json(
+        new ApiResponse(401, null, "Unauthorized", false)
+      );
     }
 
-    // ----------------------------------------------------------
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res.status(400).json(
+        new ApiResponse(400, null, "Invalid user ID", false)
+      );
+    }
+
     // 2. Mark all unread notifications as read
-    // ----------------------------------------------------------
     const result = await Notification.updateMany(
       {
         user: userId,
         isRead: false,
       },
       {
-        $set: {
-          isRead: true,
-        },
+        $set: { isRead: true },
       }
     );
 
-    // ----------------------------------------------------------
-    // 3. Return response
-    // ----------------------------------------------------------
+    // 3. Invalidate notification caches only when data changed
+    if (result.modifiedCount > 0) {
+      try {
+        const versionKey = userNotificationVersionKey(userId);
+
+        // Incrementing the version invalidates cached pages that use
+        // userNotificationVersionedKey().
+        await redisClient.incr(versionKey);
+        await redisClient.expire(versionKey, 60 * 60 * 24 * 30);
+      } catch (cacheError) {
+        // MongoDB has already been updated.
+        console.error(
+          "Notification cache invalidation failed:",
+          cacheError.message
+        );
+      }
+    }
+
+    // 4. Return result
     return res.status(200).json(
       new ApiResponse(
         200,
@@ -2866,25 +2891,30 @@ const markAllNotificationsAsRead = async (req, res) => {
       )
     );
   } catch (error) {
-    console.error("markAllNotificationsAsRead error:", error);
+    console.error(
+      "markAllNotificationsAsRead error:",
+      error.message
+    );
 
-    return res
-      .status(500)
-      .json(
-        new ApiResponse(
-          500,
-          null,
-          "Failed to mark all notifications as read",
-          false
-        )
-      );
+    return res.status(500).json(
+      new ApiResponse(
+        500,
+        null,
+        "Failed to mark all notifications as read",
+        false
+      )
+    );
   }
 };
+
+
 const resendEmailVerificationOTP = async (req, res) => {
+  let otpKey;
+  let cooldownKey;
+  let otpStored = false;
+
   try {
-    // ----------------------------------------------------------
-    // 1. Get authenticated user ID
-    // ----------------------------------------------------------
+    // 1. Validate authenticated user
     const userId = req.user?.userId;
 
     if (!userId) {
@@ -2893,12 +2923,16 @@ const resendEmailVerificationOTP = async (req, res) => {
         .json(new ApiResponse(401, null, "Unauthorized", false));
     }
 
-    // ----------------------------------------------------------
+    if (!mongoose.Types.ObjectId.isValid(userId)) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid user ID", false));
+    }
+
     // 2. Find user
-    // ----------------------------------------------------------
-    const user = await User.findById(userId).select(
-      "_id email name isVerified"
-    );
+    const user = await User.findById(userId)
+      .select("_id email name isVerified")
+      .lean();
 
     if (!user) {
       return res
@@ -2906,77 +2940,80 @@ const resendEmailVerificationOTP = async (req, res) => {
         .json(new ApiResponse(404, null, "User not found", false));
     }
 
-    // ----------------------------------------------------------
-    // 3. Check if email is already verified
-    // ----------------------------------------------------------
+    // 3. Check verification status
     if (user.isVerified) {
       return res
-        .status(400)
+        .status(409)
         .json(
-          new ApiResponse(400, null, "Your email is already verified", false)
+          new ApiResponse(409, null, "Your email is already verified", false)
         );
     }
 
-    // ----------------------------------------------------------
-    // 4. Redis keys
-    // ----------------------------------------------------------
-    const otpKey = emailVerificationOtpKey(userId);
+    // 4. Define Redis keys
+    otpKey = emailVerificationOtpKey(userId);
+    cooldownKey = `email:verification:resend:${userId}`;
 
-    const resendCooldownKey = `emailVerificationResendCooldown:${userId}`;
-
-    // ----------------------------------------------------------
-    // 5. Prevent OTP resend spam
-    // ----------------------------------------------------------
-    const cooldownCreated = await redisClient.set(resendCooldownKey, "1", {
+    // 5. Atomically acquire resend cooldown (60 seconds)
+    const cooldownCreated = await redisClient.set(cooldownKey, "1", {
       NX: true,
       EX: 60,
     });
 
-    if (!cooldownCreated) {
-      const ttl = await redisClient.ttl(resendCooldownKey);
+    if (cooldownCreated !== "OK") {
+      const ttl = await redisClient.ttl(cooldownKey);
 
-      return res.status(429).json(
-        new ApiResponse(
-          429,
-          {
-            retryAfter: ttl,
-          },
-          `Please wait ${ttl} seconds before requesting another OTP`,
-          false
-        )
-      );
+      return res
+        .status(429)
+        .json(
+          new ApiResponse(
+            429,
+            { retryAfter: Math.max(ttl, 1) },
+            `Please wait ${Math.max(ttl, 1)} seconds before requesting another OTP`,
+            false
+          )
+        );
     }
 
-    // ----------------------------------------------------------
-    // 6. Generate secure 6-digit OTP
-    // ----------------------------------------------------------
+    // 6. Generate a cryptographically secure OTP
     const otp = crypto.randomInt(100000, 1000000).toString();
 
-    // ----------------------------------------------------------
-    // 7. Send verification email
-    // ----------------------------------------------------------
-    try {
-      await sendEmailVerificationOtp(user, otp);
-    } catch (emailError) {
-      // --------------------------------------------------------
-      // Email failed — remove cooldown so user can retry
-      // --------------------------------------------------------
-      await redisClient.del(resendCooldownKey);
+    // 7. Hash OTP before storing it in Redis
+    const hashedOtp = await bcrypt.hash(otp, 10);
 
-      throw emailError;
-    }
-
-    // ----------------------------------------------------------
-    // 8. Store OTP in Redis
-    // OTP expires after 5 minutes
-    // ----------------------------------------------------------
-    await redisClient.set(otpKey, otp, {
+    // 8. Store OTP hash with a five-minute TTL
+    await redisClient.set(otpKey, hashedOtp, {
       EX: 300,
     });
 
-    // ----------------------------------------------------------
-    // 9. Success response
-    // ----------------------------------------------------------
+    otpStored = true;
+
+    // 9. Send OTP email
+    try {
+      await sendEmailVerificationOtp(user, otp);
+    } catch (emailError) {
+      // Remove the unusable OTP and cooldown on email failure
+      await Promise.allSettled([
+        redisClient.del(otpKey),
+        redisClient.del(cooldownKey),
+      ]);
+
+      otpStored = false;
+
+      console.error("Email verification delivery failed:", emailError.message);
+
+      return res
+        .status(500)
+        .json(
+          new ApiResponse(
+            500,
+            null,
+            "Unable to send verification email. Please try again later.",
+            false
+          )
+        );
+    }
+
+    // 10. Return success without exposing OTP
     return res.status(200).json(
       new ApiResponse(
         200,
@@ -2989,7 +3026,20 @@ const resendEmailVerificationOTP = async (req, res) => {
       )
     );
   } catch (error) {
-    console.error("resendEmailVerificationOTP error:", error);
+    // Clean up OTP only if this request stored it
+    const cleanupTasks = [];
+
+    if (otpStored && otpKey) {
+      cleanupTasks.push(redisClient.del(otpKey));
+    }
+
+    if (cooldownKey) {
+      cleanupTasks.push(redisClient.del(cooldownKey));
+    }
+
+    await Promise.allSettled(cleanupTasks);
+
+    console.error("resendEmailVerificationOTP error:", error.message);
 
     return res
       .status(500)
