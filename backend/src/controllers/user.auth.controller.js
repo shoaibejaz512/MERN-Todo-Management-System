@@ -18,7 +18,7 @@ import {
   setCache,
   deleteCache,
 } from "../service/redis/redis.service.js";
-import { emailVerificationOtpKey, passwordResetOtpKey, updateEmailOtp, userKey, userNotificationKey, usersKey } from "../utils/chacheKeys.js";
+import { emailVerificationOtpKey, passwordResetOtpKey, updateEmailOtp, userActivityKey, userKey, userNotificationKey, usersKey, userStatsKey } from "../utils/chacheKeys.js";
 import { deleteFromCloudinary } from "../service/cloudinary.service.js";
 import mongoose from "mongoose";
 import crypto from "crypto";
@@ -2638,12 +2638,10 @@ const getUserNotifications = async (req, res) => {
   }
 };
 
+
 const getUserSessions = async (req, res) => {
   try {
-    // ----------------------------------------------------------
-    // 1. Get authenticated user ID
-    // ----------------------------------------------------------
-
+    // 1. Validate authenticated user
     const userId = req.user?.userId;
 
     if (!userId) {
@@ -2652,20 +2650,41 @@ const getUserSessions = async (req, res) => {
         .json(new ApiResponse(401, null, "Unauthorized", false));
     }
 
-    // ----------------------------------------------------------
-    // 2. Validate user ID
-    // ----------------------------------------------------------
-
     if (!mongoose.Types.ObjectId.isValid(userId)) {
       return res
         .status(400)
-        .json(new ApiResponse(400, null, "Invalid user id", false));
+        .json(new ApiResponse(400, null, "Invalid user ID", false));
     }
 
-    // ----------------------------------------------------------
-    // 3. Get active sessions
-    // ----------------------------------------------------------
+    const currentSessionId = req.user?.sessionId;
+    const cacheKey = userSessionsKey(userId);
 
+    // 2. Try Redis cache
+    const cachedSessions = await getCache(cacheKey);
+
+    if (cachedSessions) {
+      const formattedSessions = cachedSessions.map((session) => ({
+        ...session,
+        isCurrent:
+          Boolean(currentSessionId) &&
+          session.id.toString() === currentSessionId.toString(),
+      }));
+
+      return res
+        .status(200)
+        .json(
+          new ApiResponse(
+            200,
+            formattedSessions,
+            formattedSessions.length
+              ? "User sessions retrieved successfully"
+              : "No active sessions found",
+            true
+          )
+        );
+    }
+
+    // 3. Fetch active sessions from MongoDB
     const sessions = await Session.find({
       user: userId,
       expiresAt: { $gt: new Date() },
@@ -2673,29 +2692,12 @@ const getUserSessions = async (req, res) => {
       .select(
         "_id device browser os ipAddress userAgent createdAt lastActiveAt expiresAt"
       )
-      .sort({
-        lastActiveAt: -1,
-      })
+      .sort({ lastActiveAt: -1 })
       .lean();
 
-    // ----------------------------------------------------------
-    // 4. No active sessions
-    // ----------------------------------------------------------
-
-    if (sessions.length === 0) {
-      return res
-        .status(200)
-        .json(new ApiResponse(200, [], "No active sessions found", true));
-    }
-
-    // ----------------------------------------------------------
-    // 5. Mark current session
-    // ----------------------------------------------------------
-
-    const currentSessionId = req.user?.sessionId;
-
+    // 4. Format response data
     const formattedSessions = sessions.map((session) => ({
-      id: session._id,
+      id: session._id.toString(),
       device: session.device,
       browser: session.browser,
       os: session.os,
@@ -2705,25 +2707,33 @@ const getUserSessions = async (req, res) => {
       lastActiveAt: session.lastActiveAt,
       expiresAt: session.expiresAt,
       isCurrent:
-        currentSessionId && session._id.toString() === currentSessionId,
+        Boolean(currentSessionId) &&
+        session._id.toString() === currentSessionId.toString(),
     }));
 
-    // ----------------------------------------------------------
-    // 6. Send response
-    // ----------------------------------------------------------
+    // 5. Cache session data for 30 seconds
+    // A cache failure should not prevent the database response.
+    try {
+      await setCache(cacheKey, formattedSessions, 30);
+    } catch (cacheError) {
+      console.error("User sessions cache write failed:", cacheError.message);
+    }
 
+    // 6. Return response
     return res
       .status(200)
       .json(
         new ApiResponse(
           200,
           formattedSessions,
-          "User sessions retrieved successfully",
+          formattedSessions.length
+            ? "User sessions retrieved successfully"
+            : "No active sessions found",
           true
         )
       );
   } catch (error) {
-    console.error("Get user sessions error:", error);
+    console.error("Get user sessions error:", error.message);
 
     return res
       .status(500)
@@ -2732,6 +2742,7 @@ const getUserSessions = async (req, res) => {
       );
   }
 };
+
 const markNotificationAsRead = async (req, res) => {
   try {
     // ----------------------------------------------------------
