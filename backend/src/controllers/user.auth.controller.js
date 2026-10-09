@@ -1533,224 +1533,154 @@ const verifyEmail = async (req, res) => {
 
 
 const generateUpdateEmailOtp = async (req, res) => {
-  try {
-    // ----------------------------------------------------------
-    // 1. Get authenticated user ID
-    // ----------------------------------------------------------
+  let otpKey;
+  let cooldownKey;
+  let otpCreated = false;
 
+  try {
+    // 1. Validate authenticated user
     const userId = req.user?.userId;
 
     if (!userId) {
-      return res
-        .status(401)
-        .json(
-          new ApiResponse(
-            401,
-            null,
-            "Unauthorized",
-            false
-          )
-        );
+      return res.status(401).json(
+        new ApiResponse(401, null, "Unauthorized", false)
+      );
     }
-
-    // ----------------------------------------------------------
-    // 2. Validate MongoDB ObjectId
-    // ----------------------------------------------------------
 
     if (!mongoose.Types.ObjectId.isValid(userId)) {
-      return res
-        .status(400)
-        .json(
-          new ApiResponse(
-            400,
-            null,
-            "Invalid user id",
-            false
-          )
-        );
+      return res.status(400).json(
+        new ApiResponse(400, null, "Invalid user ID", false)
+      );
     }
 
-    // ----------------------------------------------------------
-    // 3. Redis keys
-    // ----------------------------------------------------------
-
-    const otpKey = updateEmailOtp(userId);
-
-    const cooldownKey = `update-email-otp:cooldown:${userId}`;
-
-    // ----------------------------------------------------------
-    // 4. Check resend cooldown
-    //
-    // User must wait 60 seconds before requesting
-    // another OTP.
-    // ----------------------------------------------------------
-
-    const cooldownExists = await getCache(cooldownKey);
-
-    if (cooldownExists) {
-      return res
-        .status(429)
-        .json(
-          new ApiResponse(
-            429,
-            null,
-            "Please wait before requesting another OTP",
-            false
-          )
-        );
-    }
-
-    // ----------------------------------------------------------
-    // 5. Check if an active OTP already exists
-    //
-    // OTP remains valid for 5 minutes.
-    // ----------------------------------------------------------
-
-    const existingOtp = await getCache(otpKey);
-
-    if (existingOtp) {
-      return res
-        .status(429)
-        .json(
-          new ApiResponse(
-            429,
-            null,
-            "An OTP has already been sent. Please check your email.",
-            false
-          )
-        );
-    }
-
-    // ----------------------------------------------------------
-    // 6. Find authenticated user
-    // ----------------------------------------------------------
-
+    // 2. Find the authenticated user
     const user = await User.findById(userId)
       .select("_id name email")
       .lean();
 
     if (!user) {
-      return res
-        .status(404)
-        .json(
-          new ApiResponse(
-            404,
-            null,
-            "User not found",
-            false
-          )
-        );
+      return res.status(404).json(
+        new ApiResponse(404, null, "User not found", false)
+      );
     }
 
-    // ----------------------------------------------------------
-    // 7. Generate cryptographically secure 6-digit OTP
-    // ----------------------------------------------------------
+    // 3. Define Redis keys
+    otpKey = updateEmailOtp(userId);
+    cooldownKey = `update-email-otp:cooldown:${userId}`;
 
-    const otp = crypto
-      .randomInt(100000, 1000000)
-      .toString();
+    // 4. Check whether an active OTP exists
+    const existingOtp = await getCache(otpKey);
 
-    // ----------------------------------------------------------
-    // 8. Hash OTP before storing it in Redis
-    //
-    // Raw OTP is only used for sending the email.
-    // Redis stores only the SHA-256 hash.
-    // ----------------------------------------------------------
+    if (existingOtp) {
+      return res.status(429).json(
+        new ApiResponse(
+          429,
+          null,
+          "An OTP has already been sent. Please check your email.",
+          false
+        )
+      );
+    }
 
+    // 5. Atomically acquire a 60-second cooldown
+    // Use the Redis client exposed by your existing Redis service.
+    // Adapt this call if your service uses a different API.
+    const cooldownAcquired = await setCache(
+      cooldownKey,
+      "1",
+      {
+        NX: true,
+        EX: 60,
+      }
+    );
+
+    if (cooldownAcquired !== "OK") {
+      return res.status(429).json(
+        new ApiResponse(
+          429,
+          null,
+          "Please wait before requesting another OTP.",
+          false
+        )
+      );
+    }
+
+    // 6. Generate a cryptographically secure six-digit OTP
+    const otp = crypto.randomInt(100000, 1000000).toString();
+
+    // 7. Hash OTP using SHA-256 before Redis storage
     const hashedOtp = crypto
       .createHash("sha256")
       .update(otp)
       .digest("hex");
 
-    // ----------------------------------------------------------
-    // 9. Store hashed OTP in Redis
-    //
-    // TTL = 300 seconds = 5 minutes
-    // ----------------------------------------------------------
+    // 8. Store the hash with a five-minute expiration
+    await setCache(otpKey, hashedOtp, 300);
+    otpCreated = true;
 
-    await setCache(
-      otpKey,
-      hashedOtp,
-      300
-    );
-
-    // ----------------------------------------------------------
-    // 10. Set resend cooldown
-    //
-    // TTL = 60 seconds
-    // ----------------------------------------------------------
-
-    await setCache(
-      cooldownKey,
-      "1",
-      60
-    );
-
-    // ----------------------------------------------------------
-    // 11. Send OTP through email
-    // ----------------------------------------------------------
-
+    // 9. Send OTP email
     try {
       await sendUpdateEmailOtp(user, otp);
     } catch (emailError) {
-      // Email failed, so invalidate the OTP and cooldown.
+      // Invalidate the OTP and cooldown if email sending fails
       await Promise.allSettled([
         deleteCache(otpKey),
         deleteCache(cooldownKey),
       ]);
 
       console.error(
-        "Update email OTP email error:",
+        "Update email OTP delivery failed:",
         emailError.message
       );
 
-      return res
-        .status(500)
-        .json(
-          new ApiResponse(
-            500,
-            null,
-            "Failed to send OTP",
-            false
-          )
-        );
-    }
-
-    // ----------------------------------------------------------
-    // 12. Success response
-    //
-    // NEVER return the OTP.
-    // ----------------------------------------------------------
-
-    return res
-      .status(200)
-      .json(
+      return res.status(500).json(
         new ApiResponse(
-          200,
+          500,
           null,
-          "OTP sent successfully. Please check your email.",
-          true
+          "Unable to send OTP. Please try again later.",
+          false
         )
       );
+    }
+
+    // 10. Return success without exposing the OTP
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        null,
+        "OTP sent successfully. Please check your email.",
+        true
+      )
+    );
   } catch (error) {
+    // Clean up only keys associated with this request
+    const cleanup = [];
+
+    if (otpCreated && otpKey) {
+      cleanup.push(deleteCache(otpKey));
+    }
+
+    if (cooldownKey) {
+      cleanup.push(deleteCache(cooldownKey));
+    }
+
+    await Promise.allSettled(cleanup);
+
     console.error(
       "Generate update email OTP error:",
       error.message
     );
 
-    return res
-      .status(500)
-      .json(
-        new ApiResponse(
-          500,
-          null,
-          "Failed to generate OTP",
-          false
-        )
-      );
+    return res.status(500).json(
+      new ApiResponse(
+        500,
+        null,
+        "Unable to process your request. Please try again later.",
+        false
+      )
+    );
   }
 };
-
 
 const verifyUpdateEmailOtp = async (req, res) => {
   const session = await mongoose.startSession();
