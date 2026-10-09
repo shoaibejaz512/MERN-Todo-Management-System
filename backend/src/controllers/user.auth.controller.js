@@ -1283,17 +1283,22 @@ const searchUser = async (req, res) => {
 
 
 //save otp inside redis not db 
+
 const generateEmailVerificationOtp = async (req, res) => {
+  let cacheKey;
+
   try {
+    // STEP 1: Validate user ID
     const { id } = req.params;
 
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res
         .status(400)
-        .json(new ApiResponse(400, null, "Invalid user id", false));
+        .json(new ApiResponse(400, null, "Invalid user ID", false));
     }
 
-    const user = await User.findById(id).select("email isVerified");
+    // STEP 2: Find user
+    const user = await User.findById(id).select("_id email isVerified");
 
     if (!user) {
       return res
@@ -1301,62 +1306,100 @@ const generateEmailVerificationOtp = async (req, res) => {
         .json(new ApiResponse(404, null, "User not found", false));
     }
 
+    // STEP 3: Check verification status
     if (user.isVerified) {
       return res
         .status(409)
-        .json(new ApiResponse(409, null, "Email is already verified", false));
+        .json(
+          new ApiResponse(409, null, "Email is already verified", false)
+        );
     }
 
-    const cacheKey = emailVerificationOtpKey(id);
+    // STEP 4: Define Redis keys
+    cacheKey = emailVerificationOtpKey(id);
+    const cooldownKey = `email:verification:cooldown:${id}`;
 
-    // Check if OTP already exists
+    // STEP 5: Prevent repeated OTP requests
     const existingOtp = await getCache(cacheKey);
 
     if (existingOtp) {
-      return res.status(429).json(
+      return res
+        .status(429)
+        .json(
+          new ApiResponse(
+            429,
+            null,
+            "OTP already sent. Please wait before requesting another OTP.",
+            false
+          )
+        );
+    }
+
+    // STEP 6: Generate a secure six-digit OTP
+    const otp = crypto.randomInt(100000, 1000000).toString();
+
+    // STEP 7: Hash OTP before storing it in Redis
+    const hashedOtp = await bcrypt.hash(otp, 10);
+
+    // STEP 8: Store OTP with a five-minute expiration
+    await setCache(cacheKey, hashedOtp, 300);
+
+    // STEP 9: Send verification email
+    try {
+      await sendEmail({
+        to: user.email,
+        subject: "Verify your FlowDo email",
+        text: `Your FlowDo verification OTP is ${otp}. It expires in 5 minutes.`,
+      });
+    } catch (emailError) {
+      await deleteCache(cacheKey);
+
+      console.error(
+        "Email verification delivery failed:",
+        emailError.message
+      );
+
+      return res
+        .status(500)
+        .json(
+          new ApiResponse(
+            500,
+            null,
+            "Unable to send verification email. Please try again later.",
+            false
+          )
+        );
+    }
+
+    // STEP 10: Return success response
+    return res
+      .status(200)
+      .json(
         new ApiResponse(
-          429,
+          200,
           null,
-          "OTP already sent. Please wait before requesting another OTP.",
+          "Verification OTP sent successfully",
+          true
+        )
+      );
+  } catch (error) {
+    console.error(
+      "Generate email verification OTP failed:",
+      error.message
+    );
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          "Internal server error",
           false
         )
       );
-    }
-
-    // Generate 6-digit OTP
-    const otp = crypto.randomInt(100000, 1000000).toString();
-
-    // Store OTP in Redis for 5 minutes
-    await setCache(cacheKey, otp, 300);
-
-    await sendEmail({
-      to: user.email,
-      subject: "Verify your FlowDo email",
-      text: `Your FlowDo verification OTP is ${otp}. It expires in 10 minutes.`,
-    });
-
-    return res.status(200).json(
-      new ApiResponse(
-        200,
-        null,
-        "Verification OTP sent successfully",
-        true
-      )
-    );
-  } catch (error) {
-    console.error(`Generate email OTP failed: ${error.message}`);
-
-    return res.status(error.statusCode || 500).json(
-      new ApiResponse(
-        error.statusCode || 500,
-        null,
-        error.message || "Internal server error",
-        false
-      )
-    );
   }
 };
-
 const verifyEmail = async (req, res) => {
   const session = await mongoose.startSession();
 
