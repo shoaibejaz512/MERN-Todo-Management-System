@@ -3053,6 +3053,17 @@ const resendEmailVerificationOTP = async (req, res) => {
       );
   }
 };
+
+const protectLoginBruteForce = async (req,res) => {}
+const sessionRevocation = async (req,res) => {}
+const emailChangeSecurity = async (req,res) => {}
+const cacheInvalidationAudit = async (req,res) => {}
+const accountDeletionReAuthentication = async (req,res) => {}
+const exportUserData = async (req,res) => {}
+const securityEvents = async (req,res) => {}
+
+
+
 export {
   registerUser,
   loginUser,
@@ -3079,4 +3090,11 @@ export {
   markNotificationAsRead,
   markAllNotificationsAsRead,
   resendEmailVerificationOTP,
+  protectLoginBruteForce,
+  sessionRevocation,
+  emailChangeSecurity,
+  cacheInvalidationAudit,
+  accountDeletionReAuthentication,
+  exportUserData,
+  securityEvents
 };
