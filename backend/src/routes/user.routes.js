@@ -22,13 +22,15 @@ import { otpRateLimiter } from "../middlewears/rate-limiter-flexible-middlewear/
 import { loginRateLimit } from "../middlewears/rate-limiter-flexible-middlewear/loginRatelimiter.js";
 import { registerRateLimit } from "../middlewears/rate-limiter-flexible-middlewear/registerRateLimiter.js";
 import upload from "../middlewears/multer/upload.js";
+import { protectLoginBruteForce } from "../middlewares/protectLoginBruteForce.js";
+
 
 const router = Router();
 
 router
   .route("/register")
   .post(validate(registerSchema), registerRateLimit, registerUser);
-router.route("/login").post(loginRateLimit, loginUser);
+router.route("/login").post(loginRateLimit,protectLoginBruteForce, loginUser);
 router.route("/logout").post(verifyJWT, logoutUser);
 router
   .route("/send-password-reset-otp")

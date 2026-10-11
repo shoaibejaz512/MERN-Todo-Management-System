@@ -22,6 +22,7 @@ import { emailVerificationOtpKey, passwordResetOtpKey, updateEmailOtp, userActiv
 import { deleteFromCloudinary } from "../service/cloudinary.service.js";
 import mongoose from "mongoose";
 import crypto from "crypto";
+import { clearLoginAttemptState } from "../middlewares/protectLoginBruteForce.js";
 
 const registerUser = async (req, res) => {
   //get all the values
@@ -108,12 +109,7 @@ const loginUser = async (req, res) => {
       return res
         .status(400)
         .json(
-          new ApiResponse(
-            400,
-            null,
-            "Email and password are required",
-            false
-          )
+          new ApiResponse(400, null, "Email and password are required", false)
         );
     }
 
@@ -121,9 +117,7 @@ const loginUser = async (req, res) => {
     // 3. Normalize email
     // ----------------------------------------------------------
 
-    const normalizedEmail = email
-      .toLowerCase()
-      .trim();
+    const normalizedEmail = email.toLowerCase().trim();
 
     // ----------------------------------------------------------
     // 4. Find user
@@ -137,12 +131,7 @@ const loginUser = async (req, res) => {
       return res
         .status(401)
         .json(
-          new ApiResponse(
-            401,
-            null,
-            "Email or password is incorrect",
-            false
-          )
+          new ApiResponse(401, null, "Email or password is incorrect", false)
         );
     }
 
@@ -150,22 +139,13 @@ const loginUser = async (req, res) => {
     // 5. Verify password
     // ----------------------------------------------------------
 
-    const isPasswordCorrect =
-      await bcrypt.compare(
-        password,
-        user.password
-      );
+    const isPasswordCorrect = await bcrypt.compare(password, user.password);
 
     if (!isPasswordCorrect) {
       return res
         .status(401)
         .json(
-          new ApiResponse(
-            401,
-            null,
-            "Email or password is incorrect",
-            false
-          )
+          new ApiResponse(401, null, "Email or password is incorrect", false)
         );
     }
 
@@ -173,32 +153,19 @@ const loginUser = async (req, res) => {
     // 6. Check user ID
     // ----------------------------------------------------------
 
-    if (
-      !mongoose.Types.ObjectId.isValid(
-        user._id
-      )
-    ) {
+    if (!mongoose.Types.ObjectId.isValid(user._id)) {
       return res
         .status(500)
-        .json(
-          new ApiResponse(
-            500,
-            null,
-            "Invalid user account",
-            false
-          )
-        );
+        .json(new ApiResponse(500, null, "Invalid user account", false));
     }
 
     // ----------------------------------------------------------
     // 7. Get request/device information
     // ----------------------------------------------------------
 
-    const userAgent =
-      req.get("user-agent") || "Unknown";
+    const userAgent = req.get("user-agent") || "Unknown";
 
-    const ipAddress =
-      req.ip || "Unknown";
+    const ipAddress = req.ip || "Unknown";
 
     // ----------------------------------------------------------
     // 8. Session expiration
@@ -206,10 +173,7 @@ const loginUser = async (req, res) => {
     // Refresh token lifetime = 7 days
     // ----------------------------------------------------------
 
-    const expiresAt = new Date(
-      Date.now() +
-        7 * 24 * 60 * 60 * 1000
-    );
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
     // ----------------------------------------------------------
     // 9. Create Session
@@ -249,21 +213,13 @@ const loginUser = async (req, res) => {
     // }
     // ----------------------------------------------------------
 
-    const accessToken =
-      signAccessToken(
-        user,
-        session._id
-      );
+    const accessToken = signAccessToken(user, session._id);
 
     // ----------------------------------------------------------
     // 11. Generate Refresh Token
     // ----------------------------------------------------------
 
-    const refreshToken =
-      signRefreshToken(
-        user,
-        session._id
-      );
+    const refreshToken = signRefreshToken(user, session._id);
 
     // ----------------------------------------------------------
     // 12. Hash Refresh Token
@@ -271,18 +227,16 @@ const loginUser = async (req, res) => {
     // NEVER store the raw refresh token in MongoDB.
     // ----------------------------------------------------------
 
-    const refreshTokenHash =
-      crypto
-        .createHash("sha256")
-        .update(refreshToken)
-        .digest("hex");
+    const refreshTokenHash = crypto
+      .createHash("sha256")
+      .update(refreshToken)
+      .digest("hex");
 
     // ----------------------------------------------------------
     // 13. Store refresh token hash inside Session
     // ----------------------------------------------------------
 
-    session.refreshTokenHash =
-      refreshTokenHash;
+    session.refreshTokenHash = refreshTokenHash;
 
     // ----------------------------------------------------------
     // 14. Save Session
@@ -296,44 +250,28 @@ const loginUser = async (req, res) => {
     // Don't return password or refresh token information.
     // ----------------------------------------------------------
 
-    const loggedInUser =
-      await User.findById(user._id)
-        .select(
-          "-password -refreshTokens"
-        )
-        .lean();
+    const loggedInUser = await User.findById(user._id)
+      .select("-password -refreshTokens")
+      .lean();
 
     // ----------------------------------------------------------
     // 16. Set authentication cookies
     // ----------------------------------------------------------
 
-    setAuthCookies(
-      res,
-      accessToken,
-      refreshToken
-    );
+    setAuthCookies(res, accessToken, refreshToken);
 
     // ----------------------------------------------------------
     // 17. Success response
     // ----------------------------------------------------------
 
-    console.log(
-      green(
-        `User login successful: ${user._id}`
-      )
-    );
+    console.log(green(`User login successful: ${user._id}`));
+
+    // Inside loginUser, after credentials are verified:
+    await clearLoginAttemptState(req);
 
     return res
       .status(200)
-      .json(
-        new ApiResponse(
-          200,
-          loggedInUser,
-          "User login successful",
-          true
-        )
-      );
-
+      .json(new ApiResponse(200, loggedInUser, "User login successful", true));
   } catch (error) {
 
     // ----------------------------------------------------------
@@ -3061,7 +2999,6 @@ const cacheInvalidationAudit = async (req,res) => {}
 const accountDeletionReAuthentication = async (req,res) => {}
 const exportUserData = async (req,res) => {}
 const securityEvents = async (req,res) => {}
-
 
 
 export {
