@@ -301,55 +301,52 @@ const loginUser = async (req, res) => {
 // LOGOUT USER
 // ==========================================================
 
-const logoutUser = async (req, res) => {
-  try {
-    // ----------------------------------------------------------
-    // 1. Get authenticated user information
-    // ----------------------------------------------------------
 
+const logoutUser = async (req, res) => {
+  const cookieOptions = {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "strict",
+    path: "/",
+  };
+
+  try {
     const userId = req.user?.userId;
     const sessionId = req.user?.sessionId;
 
-    // ----------------------------------------------------------
-    // 2. Validate authentication data
-    // ----------------------------------------------------------
-
     if (!userId || !sessionId) {
-      return res
-        .status(401)
-        .json(
-          new ApiResponse(
-            401,
-            null,
-            "Authentication session is required",
-            false
-          )
-        );
-    }
+      res.clearCookie("accessToken", cookieOptions);
+      res.clearCookie("refreshToken", cookieOptions);
 
-    // ----------------------------------------------------------
-    // 3. Validate MongoDB ObjectIds
-    // ----------------------------------------------------------
+      return res.status(401).json(
+        new ApiResponse(
+          401,
+          null,
+          "Authentication session is required",
+          false
+        )
+      );
+    }
 
     if (
       !mongoose.Types.ObjectId.isValid(userId) ||
       !mongoose.Types.ObjectId.isValid(sessionId)
     ) {
-      return res
-        .status(400)
-        .json(
-          new ApiResponse(400, null, "Invalid authentication session", false)
-        );
+      res.clearCookie("accessToken", cookieOptions);
+      res.clearCookie("refreshToken", cookieOptions);
+
+      return res.status(401).json(
+        new ApiResponse(
+          401,
+          null,
+          "Invalid authentication session",
+          false
+        )
+      );
     }
 
-    // ----------------------------------------------------------
-    // 4. Revoke current session
-    // ----------------------------------------------------------
-    // We use both user + session ID so a user cannot revoke
-    // another user's session.
-    // ----------------------------------------------------------
-
-    const revokedSession = await Session.findOneAndUpdate(
+    // Revoke only the authenticated user's current session.
+    await Session.updateOne(
       {
         _id: sessionId,
         user: userId,
@@ -359,67 +356,36 @@ const logoutUser = async (req, res) => {
         $set: {
           revokedAt: new Date(),
         },
-      },
-      {
-        new: true,
       }
     );
 
-    // ----------------------------------------------------------
-    // 5. Clear authentication cookies
-    // ----------------------------------------------------------
-    // Cookie options should match the options used when
-    // creating the cookies.
-    // ----------------------------------------------------------
+    // Clear cookies only after the revocation operation succeeds.
+    res.clearCookie("accessToken", cookieOptions);
+    res.clearCookie("refreshToken", cookieOptions);
 
-    res.clearCookie("accessToken", {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-    });
-
-    res.clearCookie("refreshToken", {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
-    });
-
-    // ----------------------------------------------------------
-    // 6. Session already revoked / expired
-    // ----------------------------------------------------------
-    // Even if the session doesn't exist, clearing the cookies
-    // makes the client logged out.
-    // ----------------------------------------------------------
-
-    if (!revokedSession) {
-      console.log(
-        green(`Logout completed — session already inactive: ${sessionId}`)
-      );
-
-      return res
-        .status(200)
-        .json(new ApiResponse(200, null, "User logged out successfully", true));
-    }
-
-    // ----------------------------------------------------------
-    // 7. Successful logout
-    // ----------------------------------------------------------
-
-    console.log(green(`User logged out successfully: ${userId}`));
-
-    return res
-      .status(200)
-      .json(new ApiResponse(200, null, "User logged out successfully", true));
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        null,
+        "User logged out successfully",
+        true
+      )
+    );
   } catch (error) {
-    // ----------------------------------------------------------
-    // 8. Error handling
-    // ----------------------------------------------------------
+    console.error("Logout failed:", error.message);
 
-    console.error(red(`Logout failed: ${error.message}`));
+    // Best-effort cookie cleanup; server-side revocation may have failed.
+    res.clearCookie("accessToken", cookieOptions);
+    res.clearCookie("refreshToken", cookieOptions);
 
-    return res
-      .status(500)
-      .json(new ApiResponse(500, null, "Failed to logout user", false));
+    return res.status(500).json(
+      new ApiResponse(
+        500,
+        null,
+        "Logout could not be completed. Please try again.",
+        false
+      )
+    );
   }
 };
 
@@ -754,9 +720,10 @@ const changePassword = async (req, res) => {
       .json(new ApiResponse(500, null, error.message, false));
   }
 };
+
+
 const refreshAccessToken = async (req, res) => {
   try {
-    // STEP 1: Get refresh token from cookies
     const incomingRefreshToken = req.cookies?.refreshToken;
 
     if (!incomingRefreshToken) {
@@ -765,80 +732,166 @@ const refreshAccessToken = async (req, res) => {
         .json(new ApiResponse(401, null, "Refresh token is required", false));
     }
 
-    // STEP 2: Verify JWT
-    const decoded = jwt.verify(
-      incomingRefreshToken,
-      process.env.JWT_REFRESH_SECRET
-    );
+    // 1. Verify refresh token
+    let decoded;
 
-    // STEP 3: Find user
-    const user = await User.findById(decoded.userId);
+    try {
+      decoded = jwt.verify(
+        incomingRefreshToken,
+        process.env.JWT_REFRESH_SECRET,
+        { algorithms: ["HS256"] }
+      );
+    } catch (error) {
+      const message =
+        error.name === "TokenExpiredError"
+          ? "Refresh token expired. Please log in again."
+          : "Invalid refresh token";
 
-    if (!user) {
-      return res
-        .status(404)
-        .json(new ApiResponse(404, null, "User not found", false));
+      return res.status(401).json(new ApiResponse(401, null, message, false));
     }
 
-    // STEP 4: Find session
-    const session = user.refreshTokens.find(
-      (session) => session.token === incomingRefreshToken
-    );
+    // 2. Validate token payload
+    if (
+      !decoded?.userId ||
+      !decoded?.sessionId ||
+      !mongoose.isValidObjectId(decoded.userId) ||
+      !mongoose.isValidObjectId(decoded.sessionId)
+    ) {
+      return res
+        .status(401)
+        .json(
+          new ApiResponse(401, null, "Invalid refresh token payload", false)
+        );
+    }
 
-    if (!session) {
+    // 3. Verify user exists
+    const userExists = await User.exists({
+      _id: decoded.userId,
+    });
+
+    if (!userExists) {
       return res
         .status(401)
         .json(new ApiResponse(401, null, "Invalid refresh token", false));
     }
 
-    // STEP 5: Check database expiry
-    if (session.expiresAt < new Date()) {
-      user.refreshTokens = user.refreshTokens.filter(
-        (s) => s.token !== incomingRefreshToken
-      );
+    const now = new Date();
 
-      await user.save();
+    // 4. Find active session
+    const session = await Session.findOne({
+      _id: decoded.sessionId,
+      user: decoded.userId,
+      revokedAt: null,
+      expiresAt: { $gt: now },
+    }).select("+refreshTokenHash");
 
+    if (!session) {
       return res
         .status(401)
-        .json(new ApiResponse(401, null, "Refresh token expired", false));
+        .json(
+          new ApiResponse(
+            401,
+            null,
+            "Session is invalid, expired, or revoked",
+            false
+          )
+        );
     }
 
-    // STEP 6: Generate new tokens
-    const newAccessToken = signAccessToken(user);
-    const newRefreshToken = signRefreshToken(user);
+    // 5. Verify refresh token hash
+    const incomingTokenHash = crypto
+      .createHash("sha256")
+      .update(incomingRefreshToken)
+      .digest("hex");
 
-    // STEP 7: Rotate refresh token
-    session.token = newRefreshToken;
-    session.createdAt = new Date();
-    session.expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const storedTokenHash = session.refreshTokenHash;
 
-    await user.save();
+    if (
+      typeof storedTokenHash !== "string" ||
+      !/^[a-f0-9]{64}$/i.test(storedTokenHash) ||
+      !crypto.timingSafeEqual(
+        Buffer.from(incomingTokenHash, "hex"),
+        Buffer.from(storedTokenHash, "hex")
+      )
+    ) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Invalid refresh token", false));
+    }
 
-    // STEP 8: Set cookies
+    // 6. Generate new tokens for the same session
+    const user = { _id: decoded.userId };
+
+    const newAccessToken = signAccessToken(user, session._id);
+    const newRefreshToken = signRefreshToken(user, session._id);
+
+    const newRefreshTokenHash = crypto
+      .createHash("sha256")
+      .update(newRefreshToken)
+      .digest("hex");
+
+    const newExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+    // 7. Atomically rotate refresh token
+    const updatedSession = await Session.findOneAndUpdate(
+      {
+        _id: session._id,
+        user: decoded.userId,
+        refreshTokenHash: incomingTokenHash,
+        revokedAt: null,
+        expiresAt: { $gt: new Date() },
+      },
+      {
+        $set: {
+          refreshTokenHash: newRefreshTokenHash,
+          expiresAt: newExpiresAt,
+          lastActiveAt: new Date(),
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+      }
+    ).select("_id");
+
+    if (!updatedSession) {
+      return res
+        .status(401)
+        .json(
+          new ApiResponse(
+            401,
+            null,
+            "Session is no longer active. Please log in again.",
+            false
+          )
+        );
+    }
+
+    // 8. Set authentication cookies
     setAuthCookies(res, newAccessToken, newRefreshToken);
 
-    // STEP 9: Response
-    return res.status(200).json(
-      new ApiResponse(
-        200,
-        {
-          accessToken: newAccessToken,
-        },
-        "Access token refreshed successfully",
-        true
-      )
-    );
+    // 9. Send response
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          { accessToken: newAccessToken },
+          "Access token refreshed successfully",
+          true
+        )
+      );
   } catch (error) {
-    console.error(error);
+    console.error("refreshAccessToken error:", error.message);
 
     return res
-      .status(401)
+      .status(500)
       .json(
-        new ApiResponse(401, null, "Refresh token expired or invalid", false)
+        new ApiResponse(500, null, "Unable to refresh access token", false)
       );
   }
 };
+
 
 const updateUserProfile = async (req, res) => {
   try {
@@ -2992,8 +3045,113 @@ const resendEmailVerificationOTP = async (req, res) => {
   }
 };
 
-const protectLoginBruteForce = async (req,res) => {}
-const sessionRevocation = async (req,res) => {}
+
+// ----------------------------------------------------------
+// Revoke a specific user session
+// Route example: DELETE /api/v1/users/sessions/:sessionId
+// Authentication middleware must run before this controller.
+// ----------------------------------------------------------
+
+export const sessionRevocation = async (req, res) => {
+  try {
+    // 1. Get authenticated user and target session
+    const userId = req.user?.userId;
+    const { sessionId } = req.params;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json(
+          new ApiResponse(401, null, "Authentication required", false)
+        );
+    }
+
+    // 2. Validate session ID before querying MongoDB
+    if (!sessionId || !mongoose.isValidObjectId(sessionId)) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "Invalid session ID", false)
+        );
+    }
+
+    const now = new Date();
+
+    // 3. Atomically revoke only a session owned by this user.
+    // The ownership check prevents users from revoking
+    // sessions belonging to other accounts.
+    const revokedSession = await Session.findOneAndUpdate(
+      {
+        _id: sessionId,
+        user: userId,
+        expiresAt: { $gt: now },
+        revokedAt: null,
+      },
+      {
+        $set: {
+          revokedAt: now,
+        },
+      },
+      {
+        new: true,
+        runValidators: true,
+        projection: { _id: 1 },
+      }
+    );
+
+    // Do not reveal whether another user's session exists.
+    if (!revokedSession) {
+      return res
+        .status(404)
+        .json(
+          new ApiResponse(
+            404,
+            null,
+            "Active session not found",
+            false
+          )
+        );
+    }
+
+    // 4. If the user revoked their CURRENT session,
+    // clear its browser cookies too.
+    if (req.user.sessionId === sessionId) {
+      const cookieOptions = {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        path: "/",
+      };
+
+      res.clearCookie("accessToken", cookieOptions);
+      res.clearCookie("refreshToken", cookieOptions);
+    }
+
+    // 5. Return a safe response; never expose tokens.
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        { sessionId: revokedSession._id },
+        "Session revoked successfully",
+        true
+      )
+    );
+  } catch (error) {
+    console.error("Session revocation error:", error);
+
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          "Unable to revoke session",
+          false
+        )
+      );
+  }
+};
+
 const emailChangeSecurity = async (req,res) => {}
 const cacheInvalidationAudit = async (req,res) => {}
 const accountDeletionReAuthentication = async (req,res) => {}
@@ -3027,7 +3185,6 @@ export {
   markNotificationAsRead,
   markAllNotificationsAsRead,
   resendEmailVerificationOTP,
-  protectLoginBruteForce,
   sessionRevocation,
   emailChangeSecurity,
   cacheInvalidationAudit,

@@ -1,92 +1,108 @@
 import jwt from "jsonwebtoken";
+import mongoose from "mongoose";
 
+import Session from "../../models/session.model.js";
 import ApiResponse from "../../utils/apiResponseHandler.js";
 
-export const verifyJWT = (req, res, next) => {
+export const verifyJWT = async (req, res, next) => {
   try {
-    // ----------------------------------------------------------
-    // 1. Get access token from HTTP-only cookie
-    // ----------------------------------------------------------
-
     const token = req.cookies?.accessToken;
 
     if (!token) {
-      return res
-        .status(401)
-        .json(new ApiResponse(401, null, "Access token is required", false));
+      return res.status(401).json(
+        new ApiResponse(
+          401,
+          null,
+          "Access token is required",
+          false
+        )
+      );
     }
 
-    // ----------------------------------------------------------
-    // 2. Verify access token
-    // ----------------------------------------------------------
+    let decoded;
 
-    const decoded = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
+    try {
+      decoded = jwt.verify(
+        token,
+        process.env.JWT_ACCESS_SECRET,
+        { algorithms: ["HS256"] }
+      );
+    } catch (error) {
+      const message =
+        error.name === "TokenExpiredError"
+          ? "Access token expired"
+          : "Invalid access token";
 
-    // ----------------------------------------------------------
-    // 3. Validate required JWT payload
-    // ----------------------------------------------------------
-
-    if (!decoded?.userId) {
-      return res
-        .status(401)
-        .json(
-          new ApiResponse(401, null, "Invalid access token payload", false)
-        );
+      return res.status(401).json(
+        new ApiResponse(401, null, message, false)
+      );
     }
 
-    // ----------------------------------------------------------
-    // 4. Attach authenticated user to request
-    //
-    // Expected payload:
-    //
-    // {
-    //   userId: "...",
-    //   sessionId: "..."
-    // }
-    //
-    // sessionId will exist after you update your login
-    // and token-generation flow.
-    // ----------------------------------------------------------
+    if (
+      !decoded?.userId ||
+      !decoded?.sessionId ||
+      !mongoose.Types.ObjectId.isValid(decoded.userId) ||
+      !mongoose.Types.ObjectId.isValid(decoded.sessionId)
+    ) {
+      return res.status(401).json(
+        new ApiResponse(
+          401,
+          null,
+          "Invalid access token payload",
+          false
+        )
+      );
+    }
+
+    // Ensure this session still belongs to the user and is active.
+    const activeSession = await Session.exists({
+      _id: decoded.sessionId,
+      user: decoded.userId,
+      revokedAt: null,
+      expiresAt: { $gt: new Date() },
+    });
+
+    if (!activeSession) {
+      res.clearCookie("accessToken", {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        path: "/",
+      });
+
+      res.clearCookie("refreshToken", {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "strict",
+        path: "/",
+      });
+
+      return res.status(401).json(
+        new ApiResponse(
+          401,
+          null,
+          "Session expired or revoked. Please log in again.",
+          false
+        )
+      );
+    }
 
     req.user = {
       userId: decoded.userId,
       sessionId: decoded.sessionId,
     };
 
-    // ----------------------------------------------------------
-    // 5. Continue to controller
-    // ----------------------------------------------------------
-
-    next();
+    return next();
   } catch (error) {
-    // ----------------------------------------------------------
-    // JWT expired
-    // ----------------------------------------------------------
+    console.error("JWT verification error:", error.message);
 
-    if (error.name === "TokenExpiredError") {
-      return res
-        .status(401)
-        .json(new ApiResponse(401, null, "Access token expired", false));
-    }
-
-    // ----------------------------------------------------------
-    // Invalid JWT
-    // ----------------------------------------------------------
-
-    if (error.name === "JsonWebTokenError") {
-      return res
-        .status(401)
-        .json(new ApiResponse(401, null, "Invalid access token", false));
-    }
-
-    // ----------------------------------------------------------
-    // Other authentication errors
-    // ----------------------------------------------------------
-
-    console.error("JWT verification error:", error);
-
-    return res
-      .status(401)
-      .json(new ApiResponse(401, null, "Authentication failed", false));
+    return res.status(500).json(
+      new ApiResponse(
+        500,
+        null,
+        "Authentication could not be verified",
+        false
+      )
+    );
   }
 };
