@@ -25,6 +25,14 @@ import upload from "../middlewears/multer/upload.js";
 import { protectLoginBruteForce } from "../middlewares/protectLoginBruteForce.js";
 
 
+import {
+  emailChangeSecurity,
+  verifyEmailChangeOTP,
+} from "../controllers/user/emailChange.controller.js";
+
+import { emailChangeRateLimit } from "../middlewares/rateLimit.middleware.js"; // * pending work making rate limiting for this request-----------------------------------------
+
+
 const router = Router();
 
 router
@@ -49,5 +57,14 @@ router.route("/").get(verifyJWT, getAllUsers);
 router.route("/delete-account").delete(verifyJWT, deleteMyAccount);
 router.route("/me").get(verifyJWT, getCurrentUser);
 router.route("/:id").get(verifyJWT, getUserProfile);
+
+
+router
+  .route("/email/change")
+  .post(verifyJWT, emailChangeRateLimit, emailChangeSecurity);
+
+router
+  .route("/email/change/verify")
+  .post(verifyJWT, emailChangeRateLimit, verifyEmailChangeOTP);
 
 export default router;
