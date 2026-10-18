@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
+    "bullmq": "^6.3.16",
     "cloudinary": "^2.10.0",
     "colorette": "^2.0.20",
     "compression": "^1.8.1",

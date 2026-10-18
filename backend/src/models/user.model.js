@@ -47,7 +47,7 @@ const userSchema = new mongoose.Schema(
       unique: true,
       match: [emailRegex, "Please enter a valid email address"],
       trim: true,
-      index:true
+      index: true,
     },
     password: {
       type: String,
@@ -117,11 +117,27 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    isDeleted: { type: Boolean, default: false, index: true },
+    deletedAt: { type: Date, default: null },
+    scheduledPurgeAt: { type: Date, default: null, index: true },
   },
   { timestamps: true }
 );
+// fields se unique:true (aur email ka duplicate index:true) hata do, phir:
+userSchema.index(
+  { email: 1 },
+  { unique: true, partialFilterExpression: { isDeleted: false } }
+);
+userSchema.index(
+  { name: 1 },
+  { unique: true, partialFilterExpression: { isDeleted: false } }
+);
 
-userSchema.index({ name: "text", email: "text" });
-userSchema.index({ createdAt: -1 });
+userSchema.pre(/^find/, function (next) {
+  if (!this.getOptions().withDeleted) {
+    this.where({ isDeleted: { $ne: true } });
+  }
+  next();
+});
 
 export const User = mongoose.model("User", userSchema);

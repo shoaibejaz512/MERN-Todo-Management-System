@@ -23,6 +23,8 @@ import { loginRateLimit } from "../middlewears/rate-limiter-flexible-middlewear/
 import { registerRateLimit } from "../middlewears/rate-limiter-flexible-middlewear/registerRateLimiter.js";
 import upload from "../middlewears/multer/upload.js";
 import { protectLoginBruteForce } from "../middlewares/protectLoginBruteForce.js";
+import { cacheInvalidationAudit } from "../controllers/cacheInvalidationAudit.controller.js";
+
 
 
 import {
@@ -66,5 +68,12 @@ router
 router
   .route("/email/change/verify")
   .post(verifyJWT, emailChangeRateLimit, verifyEmailChangeOTP);
+
+router.get(
+  "/cache-invalidation-audit",
+  verifyJWT,
+  authorizeRoles("ADMIN"),
+  cacheInvalidationAudit
+);
 
 export default router;

@@ -18,11 +18,18 @@ import {
   setCache,
   deleteCache,
 } from "../service/redis/redis.service.js";
-import { emailVerificationOtpKey, passwordResetOtpKey, updateEmailOtp, userActivityKey, userKey, userNotificationKey, usersKey, userStatsKey } from "../utils/chacheKeys.js";
+import { emailVerificationOtpKey, passwordResetOtpKey, updateEmailOtp, userActivityKey, userKey, userNotificationKey, userNotificationVersionKey, usersKey, userStatsKey } from "../utils/chacheKeys.js";
 import { deleteFromCloudinary } from "../service/cloudinary.service.js";
 import mongoose from "mongoose";
 import crypto from "crypto";
 import { clearLoginAttemptState } from "../middlewares/protectLoginBruteForce.js";
+
+
+import { invalidateCacheWithAudit } from "../services/cacheInvalidationAudit.service.js";
+
+import { userKey } from "../utils/cacheKeys.js";
+import logger from "../loggers/index.js";
+
 
 const registerUser = async (req, res) => {
   //get all the values
@@ -969,9 +976,20 @@ const updateUserProfile = async (req, res) => {
     user.passwordResetTokenExpires = undefined;
 
     // STEP 9: Invalidate user profile cache
-    const cacheKey = userKey(id);
 
-    await deleteCache(cacheKey);
+    // STEP 9: Invalidate user profile cache + audit
+
+    const auditResult = await invalidateCacheWithAudit({
+      keys: [userKey(id)],
+      event: "USER_PROFILE_UPDATED",
+      entityType: "USER",
+      entityId: id,
+      actorId: req.user.userId,
+    });
+
+    if (!auditResult.success) {
+      console.error("Profile updated, but cache invalidation failed:", id);
+    }
 
     // STEP 10: Delete old Cloudinary image
     // Only delete if a new image was uploaded
@@ -1034,7 +1052,7 @@ const getUserProfile = async (req, res) => {
     // Cache miss → fetch from MongoDB
     const user = await User.findById(id)
       .select(
-        "-password -refreshToken -passwordResetToken -passwordResetTokenExpires"
+        "-password -refreshTokens -passwordResetToken -passwordResetTokenExpires"
       )
       .lean();
 
@@ -1189,24 +1207,101 @@ const getCurrentUser = async (req, res) => {
   }
 };
 
-const deleteMyAccount = async (req, res) => {
-  const user = await User.findByIdAndDelete(req.user.userId);
+/**
+ * @route   DELETE /api/users/me
+ * @access  Private (authMiddleware -> rateLimiter -> reAuthentication)
+ * @desc    Soft-deletes the authenticated user's account, revokes sessions
+ *          and invalidates all related Redis cache entries.
+ *          Permanent purge is handled by a background job after the grace period.
+ */
 
-  if (!user) {
+
+// * -------------------------------------------------pending understand this ------------------------------------------------------------------------
+const deleteMyAccount = async (req, res, next) => {
+  const GRACE_PERIOD_DAYS = 30;
+  const MS_IN_DAY = 24 * 60 * 60 * 1000;
+  const SCAN_COUNT = 100;
+
+  const userId = String(req.user.userId);
+
+  try {
+    const now = new Date();
+
+    // 1. Atomic, idempotent soft delete (safe against double requests / races)
+    const user = await User.findOneAndUpdate(
+      { _id: userId, isDeleted: { $ne: true } },
+      {
+        $set: {
+          isDeleted: true,
+          deletedAt: now,
+          scheduledPurgeAt: new Date(
+            now.getTime() + GRACE_PERIOD_DAYS * MS_IN_DAY
+          ),
+          refreshTokens: [], // revoke all sessions (adapt to your schema)
+        },
+      },
+      { new: false, select: "_id email" }
+    ).lean();
+
+    if (!user) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
+    }
+
+    // 2. Clear auth cookies (access + refresh)
+    clearAuthCookies(res);
+
+    // 3. Cache invalidation (best-effort: never fails the request,
+    //    remaining keys expire through their TTL)
+    const deleteByPattern = async (pattern) => {
+      const stream = redisClient.scanStream({
+        match: pattern,
+        count: SCAN_COUNT,
+      });
+      for await (const keys of stream) {
+        if (keys.length) await redisClient.unlink(...keys); // non-blocking
+      }
+    };
+
+    const cacheResults = await Promise.allSettled([
+      // Exact keys
+      deleteCache(userKey(userId)),
+      deleteCache(userStatsKey(userId)),
+      deleteCache(userNotificationVersionKey(userId)),
+      deleteCache(updateEmailOtp(userId)),
+
+      // Email-scoped OTPs
+      deleteCache(emailVerificationOtpKey(user.email)),
+      deleteCache(passwordResetOtpKey(user.email)),
+
+      // Pattern keys (pagination / versioned variants). Uses SCAN, never KEYS.
+      deleteByPattern(`user:activity:${userId}:*`),
+      deleteByPattern(`user:notifications:${userId}:*`),
+      deleteByPattern("users:profile:*"),
+    ]);
+
+    cacheResults.forEach((result, index) => {
+      if (result.status === "rejected") {
+        logger.error("Cache invalidation failed on account deletion", {
+          userId,
+          step: index,
+          error: result.reason?.message,
+        });
+      }
+    });
+
+    logger.info("Account soft-deleted", { userId, ip: req.ip });
+
     return res
-      .status(404)
-      .json(new ApiResponse(404, null, "User not found", false));
+      .status(200)
+      .json(new ApiResponse(200, null, "Account deleted successfully", true));
+  } catch (error) {
+    logger.error("deleteMyAccount failed", { userId, error: error.message });
+    return next(error);
   }
-
-  clearAuthCookies(res);
-
-  let cacheKey = userKey(req.user.userId);
-  await deleteCache(cacheKey);
-
-  return res
-    .status(200)
-    .json(new ApiResponse(200, null, "Account deleted successfully", true));
 };
+
 const searchUser = async (req, res) => {
   try {
     const { q } = req.query;
@@ -3152,10 +3247,178 @@ export const sessionRevocation = async (req, res) => {
   }
 };
 
-const emailChangeSecurity = async (req,res) => {}
-const cacheInvalidationAudit = async (req,res) => {}
-const accountDeletionReAuthentication = async (req,res) => {}
-const exportUserData = async (req,res) => {}
+// Extra import needed at the top of your controller file (rest already imported):
+// import bcryptjs from "bcryptjs";
+
+/**
+ * @route   POST /api/users/restore
+ * @access  Public (user is logged out after deletion) -> MUST be rate limited
+ * @desc    Restores a soft-deleted account within the grace period
+ *          after verifying email + password.
+ */
+const restoreMyAccount = async (req, res, next) => {
+  const BCRYPT_COST = 10;
+  const SCAN_COUNT = 100;
+
+  // Single generic message for every credential/eligibility failure
+  // to prevent account enumeration.
+  const invalidResponse = () =>
+    res
+      .status(401)
+      .json(
+        new ApiResponse(
+          401,
+          null,
+          "Invalid credentials or account cannot be restored",
+          false
+        )
+      );
+
+  try {
+    const { email, password } = req.body ?? {};
+
+    // 1. Input validation (typeof checks also block NoSQL operator injection)
+    if (
+      typeof email !== "string" ||
+      typeof password !== "string" ||
+      !email.trim() ||
+      !password
+    ) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "Email and password are required", false)
+        );
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    // 2. Find a deleted account still inside its grace period
+    //    (withDeleted bypasses the pre-find soft-delete filter)
+    const user = await User.findOne({
+      email: normalizedEmail,
+      isDeleted: true,
+      scheduledPurgeAt: { $gt: new Date() },
+    })
+      .setOptions({ withDeleted: true })
+      .select("_id email password")
+      .lean();
+
+    // 3. Password verification (constant-time behaviour)
+    //    If no user matched, still burn a bcrypt cycle so response time
+    //    does not reveal whether the account exists.
+    if (!user) {
+      await bcryptjs.hash(password, BCRYPT_COST);
+      return invalidResponse();
+    }
+
+    const isPasswordValid = await bcryptjs.compare(password, user.password);
+    if (!isPasswordValid) {
+      logger.warn("Account restore: wrong password", {
+        userId: String(user._id),
+        ip: req.ip,
+      });
+      return invalidResponse();
+    }
+
+    // 4. Atomic restore. Filter re-checks state, so a purge job running
+    //    at the same moment or a double request cannot cause inconsistency.
+    let restoredUser;
+    try {
+      restoredUser = await User.findOneAndUpdate(
+        {
+          _id: user._id,
+          isDeleted: true,
+          scheduledPurgeAt: { $gt: new Date() },
+        },
+        {
+          $set: { isDeleted: false },
+          $unset: { deletedAt: "", scheduledPurgeAt: "" },
+        },
+        { new: true, select: "_id" }
+      )
+        .setOptions({ withDeleted: true })
+        .lean();
+    } catch (dbError) {
+      // Partial unique index conflict: someone registered the same
+      // email/username while this account was deleted.
+      if (dbError?.code === 11000) {
+        logger.warn("Account restore blocked by duplicate key", {
+          userId: String(user._id),
+          keyPattern: dbError.keyPattern,
+        });
+        return res
+          .status(409)
+          .json(
+            new ApiResponse(
+              409,
+              null,
+              "Account cannot be restored because the email or username is already in use",
+              false
+            )
+          );
+      }
+      throw dbError;
+    }
+
+    if (!restoredUser) {
+      // Lost a race (already restored or purged)
+      return invalidResponse();
+    }
+
+    // 5. Cache invalidation (best-effort, never fails the request).
+    //    The user reappears in listings, so stale list pages must go.
+    const deleteByPattern = async (pattern) => {
+      const stream = redisClient.scanStream({
+        match: pattern,
+        count: SCAN_COUNT,
+      });
+      for await (const keys of stream) {
+        if (keys.length) await redisClient.unlink(...keys);
+      }
+    };
+
+    const cacheResults = await Promise.allSettled([
+      deleteCache(userKey(String(user._id))),
+      deleteByPattern("users:profile:*"),
+    ]);
+
+    cacheResults.forEach((result, index) => {
+      if (result.status === "rejected") {
+        logger.error("Cache invalidation failed on account restore", {
+          userId: String(user._id),
+          step: index,
+          error: result.reason?.message,
+        });
+      }
+    });
+
+    logger.info("Account restored", { userId: String(user._id), ip: req.ip });
+
+    // 6. No auto-login: sessions were revoked on deletion, so the user
+    //    signs in through the normal login flow (keeps one auth entry point).
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          null,
+          "Account restored successfully. Please log in.",
+          true
+        )
+      );
+  } catch (error) {
+    logger.error("restoreMyAccount failed", { error: error.message });
+    return next(error);
+  }
+};
+
+
+
+// * Agla step
+// * Tum mujhe apni cacheInvalidationAudit ki current file ya uska related controller code bhej do. Agar function abhi empty hai, to user.auth.controller.js aur todo/subtask controllers ke woh functions bhejo jo data create, update, delete ya complete karte hain.
+// *   Phir hum tumhare actual FlowDo implementation ke mutabiq audit design karenge—pehle concept aur dependency mapping, phir production-ready code 
+
 const securityEvents = async (req,res) => {}
 
 
@@ -3190,5 +3453,6 @@ export {
   cacheInvalidationAudit,
   accountDeletionReAuthentication,
   exportUserData,
-  securityEvents
+  securityEvents,
+  restoreMyAccount,
 };

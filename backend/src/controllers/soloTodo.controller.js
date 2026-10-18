@@ -9,7 +9,36 @@ import { Invite } from "../models/invite.model.js";
 import { io } from "../../server.js";
 import { Comment } from "../models/comment.model.js";
 
+
 // controllers/todo.controller.js
+
+
+
+import { invalidateCacheWithAudit } from "../services/cacheInvalidationAudit.service.js";
+import {
+  soloTaskKey,
+  soloProgressKey,
+} from "../utils/cacheKeys.js";
+
+// MongoDB task update successful hone ke baad:
+
+const auditResult = await invalidateCacheWithAudit({
+  keys: [
+    soloTaskKey(taskId),
+    soloProgressKey(taskId),
+  ],
+  event: "SOLO_TASK_UPDATED",
+  entityType: "SOLO_TASK",
+  entityId: taskId,
+  actorId: req.user.userId,
+});
+
+if (!auditResult.success) {
+  console.error("Task updated, but cache invalidation failed.");
+}
+
+// Iske baad apna existing success response bhejo.
+
 
 export const createSoloTodo = async (req, res) => {
   const session = await mongoose.startSession();
@@ -140,6 +169,7 @@ export const createSoloTodo = async (req, res) => {
     await session.endSession();
   }
 };
+
 export const generateAITodo = async (req, res) => {
   try {
     const { prompt } = req.body;
