@@ -13,23 +13,34 @@ import { uploadToCloudinary } from "../utils/fileupload.js";
 import jwt from "jsonwebtoken";
 import { clearAuthCookies } from "../utils/clearAuthCookies.js";
 import Session from "../models/user.session.model.js";
+import SecurityEvent from "../models/securityEvent.model.js";
+import { clearLoginAttemptState } from "../middlewares/loginBruteForce.js";
+
 import {
   getCache,
   setCache,
   deleteCache,
 } from "../service/redis/redis.service.js";
-import { emailVerificationOtpKey, passwordResetOtpKey, updateEmailOtp, userActivityKey, userKey, userNotificationKey, userNotificationVersionKey, usersKey, userStatsKey } from "../utils/chacheKeys.js";
+import {
+  emailVerificationOtpKey,
+  passwordResetOtpKey,
+  updateEmailOtp,
+  userActivityKey,
+  userKey,
+  userNotificationKey,
+  userNotificationVersionKey,
+  usersKey,
+  userStatsKey,
+} from "../utils/chacheKeys.js";
 import { deleteFromCloudinary } from "../service/cloudinary.service.js";
 import mongoose from "mongoose";
 import crypto from "crypto";
 import { clearLoginAttemptState } from "../middlewares/protectLoginBruteForce.js";
 
-
 import { invalidateCacheWithAudit } from "../services/cacheInvalidationAudit.service.js";
 
 import { userKey } from "../utils/cacheKeys.js";
 import logger from "../loggers/index.js";
-
 
 const registerUser = async (req, res) => {
   //get all the values
@@ -96,200 +107,236 @@ const registerUser = async (req, res) => {
   }
 };
 
+
+import { clearLoginAttemptState } from "../utils/loginAttempt.js";
+
+const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Best-effort recording for failed credential checks.
+// Apply login rate limiting before this controller to prevent abuse.
+const recordFailedLogin = async (req, userId = null) => {
+  try {
+    await SecurityEvent.create({
+      userId,
+      eventType: "LOGIN_FAILED",
+      source: "AUTH",
+      outcome: "FAILURE",
+      severity: "MEDIUM",
+      ipAddress: req.ip || null,
+      userAgent: req.get("user-agent")?.slice(0, 512) || null,
+      requestId: req.id || null,
+      metadata: {
+        reason: "Login credentials were rejected",
+        failureCode: "INVALID_CREDENTIALS",
+      },
+    });
+  } catch (error) {
+    // Never log passwords, tokens, or request bodies.
+    console.error("Failed to persist login failure event.");
+  }
+};
+
 // ==========================================================
 // LOGIN USER
 // ==========================================================
 
-const loginUser = async (req, res) => {
+
+export const loginUser = async (req, res) => {
+  let mongoSession;
+
   try {
-    // ----------------------------------------------------------
-    // 1. Get login credentials
-    // ----------------------------------------------------------
+    // 1. Validate input.
+    const { email, password } = req.body ?? {};
 
-    const { email, password } = req.body;
-
-    // ----------------------------------------------------------
-    // 2. Validate input
-    // ----------------------------------------------------------
-
-    if (!email || !password) {
+    if (
+      typeof email !== "string" ||
+      typeof password !== "string" ||
+      !email.trim() ||
+      !password
+    ) {
       return res
         .status(400)
         .json(
-          new ApiResponse(400, null, "Email and password are required", false)
+          new ApiResponse(
+            400,
+            null,
+            "Email and password are required",
+            false
+          )
         );
     }
 
-    // ----------------------------------------------------------
-    // 3. Normalize email
-    // ----------------------------------------------------------
+    // 2. Normalize email.
+    const normalizedEmail = email.trim().toLowerCase();
 
-    const normalizedEmail = email.toLowerCase().trim();
-
-    // ----------------------------------------------------------
-    // 4. Find user
-    // ----------------------------------------------------------
-
+    // 3. Find user.
     const user = await User.findOne({
       email: normalizedEmail,
     });
 
+    // Keep the public error generic to avoid account enumeration.
     if (!user) {
+      await recordFailedLogin(req);
+
       return res
         .status(401)
         .json(
-          new ApiResponse(401, null, "Email or password is incorrect", false)
+          new ApiResponse(
+            401,
+            null,
+            "Email or password is incorrect",
+            false
+          )
         );
     }
 
-    // ----------------------------------------------------------
-    // 5. Verify password
-    // ----------------------------------------------------------
-
-    const isPasswordCorrect = await bcrypt.compare(password, user.password);
+    // 4. Verify password.
+    const isPasswordCorrect = await bcrypt.compare(
+      password,
+      user.password
+    );
 
     if (!isPasswordCorrect) {
+      await recordFailedLogin(req, user._id);
+
       return res
         .status(401)
         .json(
-          new ApiResponse(401, null, "Email or password is incorrect", false)
+          new ApiResponse(
+            401,
+            null,
+            "Email or password is incorrect",
+            false
+          )
         );
     }
 
-    // ----------------------------------------------------------
-    // 6. Check user ID
-    // ----------------------------------------------------------
-
-    if (!mongoose.Types.ObjectId.isValid(user._id)) {
+    // 5. Validate the authenticated account ID.
+    if (!mongoose.isValidObjectId(user._id)) {
       return res
         .status(500)
-        .json(new ApiResponse(500, null, "Invalid user account", false));
+        .json(
+          new ApiResponse(
+            500,
+            null,
+            "Unable to process login",
+            false
+          )
+        );
     }
 
-    // ----------------------------------------------------------
-    // 7. Get request/device information
-    // ----------------------------------------------------------
+    // 6. Prepare session and request metadata.
+    const now = new Date();
+    const sessionId = new mongoose.Types.ObjectId();
 
-    const userAgent = req.get("user-agent") || "Unknown";
+    const ipAddress = req.ip || null;
+    const userAgent =
+      req.get("user-agent")?.slice(0, 512) || null;
 
-    const ipAddress = req.ip || "Unknown";
+    const expiresAt = new Date(
+      now.getTime() + REFRESH_TOKEN_TTL_MS
+    );
 
-    // ----------------------------------------------------------
-    // 8. Session expiration
-    // ----------------------------------------------------------
-    // Refresh token lifetime = 7 days
-    // ----------------------------------------------------------
+    // 7. Generate tokens bound to this session.
+    const accessToken = signAccessToken(user, sessionId);
+    const refreshToken = signRefreshToken(user, sessionId);
 
-    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-
-    // ----------------------------------------------------------
-    // 9. Create Session
-    // ----------------------------------------------------------
-    // We create the session FIRST because the session._id
-    // will be included inside the JWT payload.
-    // ----------------------------------------------------------
-
-    const session = new Session({
-      user: user._id,
-
-      device: "Unknown Device",
-
-      browser: "Unknown Browser",
-
-      os: "Unknown OS",
-
-      ipAddress,
-
-      userAgent,
-
-      createdAt: new Date(),
-
-      lastActiveAt: new Date(),
-
-      expiresAt,
-    });
-
-    // ----------------------------------------------------------
-    // 10. Generate Access Token
-    // ----------------------------------------------------------
-    // Payload:
-    //
-    // {
-    //   userId,
-    //   sessionId
-    // }
-    // ----------------------------------------------------------
-
-    const accessToken = signAccessToken(user, session._id);
-
-    // ----------------------------------------------------------
-    // 11. Generate Refresh Token
-    // ----------------------------------------------------------
-
-    const refreshToken = signRefreshToken(user, session._id);
-
-    // ----------------------------------------------------------
-    // 12. Hash Refresh Token
-    // ----------------------------------------------------------
-    // NEVER store the raw refresh token in MongoDB.
-    // ----------------------------------------------------------
-
+    // 8. Hash the refresh token before persistence.
     const refreshTokenHash = crypto
       .createHash("sha256")
       .update(refreshToken)
       .digest("hex");
 
-    // ----------------------------------------------------------
-    // 13. Store refresh token hash inside Session
-    // ----------------------------------------------------------
-
-    session.refreshTokenHash = refreshTokenHash;
-
-    // ----------------------------------------------------------
-    // 14. Save Session
-    // ----------------------------------------------------------
-
-    await session.save();
-
-    // ----------------------------------------------------------
-    // 15. Get safe user information
-    // ----------------------------------------------------------
-    // Don't return password or refresh token information.
-    // ----------------------------------------------------------
-
+    // 9. Fetch safe user data before starting the transaction.
     const loggedInUser = await User.findById(user._id)
       .select("-password -refreshTokens")
-      .lean();
+      .lean()
+      .exec();
 
-    // ----------------------------------------------------------
-    // 16. Set authentication cookies
-    // ----------------------------------------------------------
+    if (!loggedInUser) {
+      return res
+        .status(401)
+        .json(
+          new ApiResponse(
+            401,
+            null,
+            "Unable to authenticate user",
+            false
+          )
+        );
+    }
 
+    // 10. Atomically persist the session and its audit event.
+    // Requires MongoDB replica set / supported sharded cluster.
+    mongoSession = await mongoose.startSession();
+
+    await mongoSession.withTransaction(async () => {
+      await Session.create(
+        [
+          {
+            _id: sessionId,
+            user: user._id,
+            device: "Unknown Device",
+            browser: "Unknown Browser",
+            os: "Unknown OS",
+            ipAddress,
+            userAgent,
+            createdAt: now,
+            lastActiveAt: now,
+            expiresAt,
+            refreshTokenHash,
+          },
+        ],
+        { session: mongoSession }
+      );
+
+      await SecurityEvent.create(
+        [
+          {
+            userId: user._id,
+            eventType: "LOGIN_SUCCESS",
+            source: "AUTH",
+            outcome: "SUCCESS",
+            severity: "LOW",
+            sessionId,
+            ipAddress,
+            userAgent,
+            requestId: req.id || null,
+            metadata: {
+              reason: "User authenticated successfully",
+            },
+            createdAt: now,
+          },
+        ],
+        { session: mongoSession }
+      );
+    });
+
+    // 11. Clear brute-force tracking after successful authentication.
+    // A Redis cleanup failure must not misreport the login as failed.
+    try {
+      await clearLoginAttemptState(req);
+    } catch (error) {
+      console.error("Failed to clear login-attempt state.");
+    }
+
+    // 12. Set cookies only after the database transaction commits.
     setAuthCookies(res, accessToken, refreshToken);
 
-    // ----------------------------------------------------------
-    // 17. Success response
-    // ----------------------------------------------------------
-
-    console.log(green(`User login successful: ${user._id}`));
-
-    // Inside loginUser, after credentials are verified:
-    await clearLoginAttemptState(req);
-
+    // 13. Return the safe user object.
     return res
       .status(200)
-      .json(new ApiResponse(200, loggedInUser, "User login successful", true));
+      .json(
+        new ApiResponse(
+          200,
+          loggedInUser,
+          "User login successful",
+          true
+        )
+      );
   } catch (error) {
-
-    // ----------------------------------------------------------
-    // Error handling
-    // ----------------------------------------------------------
-
-    console.log(
-      red(
-        `User login failed: ${error.message}`
-      )
-    );
+    // Log operational details only in server-side monitoring.
+    console.error("Login operation failed.");
 
     return res
       .status(500)
@@ -301,13 +348,16 @@ const loginUser = async (req, res) => {
           false
         )
       );
+  } finally {
+    if (mongoSession) {
+      await mongoSession.endSession();
+    }
   }
 };
 
 // ==========================================================
 // LOGOUT USER
 // ==========================================================
-
 
 const logoutUser = async (req, res) => {
   const cookieOptions = {
@@ -325,14 +375,16 @@ const logoutUser = async (req, res) => {
       res.clearCookie("accessToken", cookieOptions);
       res.clearCookie("refreshToken", cookieOptions);
 
-      return res.status(401).json(
-        new ApiResponse(
-          401,
-          null,
-          "Authentication session is required",
-          false
-        )
-      );
+      return res
+        .status(401)
+        .json(
+          new ApiResponse(
+            401,
+            null,
+            "Authentication session is required",
+            false
+          )
+        );
     }
 
     if (
@@ -342,14 +394,11 @@ const logoutUser = async (req, res) => {
       res.clearCookie("accessToken", cookieOptions);
       res.clearCookie("refreshToken", cookieOptions);
 
-      return res.status(401).json(
-        new ApiResponse(
-          401,
-          null,
-          "Invalid authentication session",
-          false
-        )
-      );
+      return res
+        .status(401)
+        .json(
+          new ApiResponse(401, null, "Invalid authentication session", false)
+        );
     }
 
     // Revoke only the authenticated user's current session.
@@ -370,14 +419,9 @@ const logoutUser = async (req, res) => {
     res.clearCookie("accessToken", cookieOptions);
     res.clearCookie("refreshToken", cookieOptions);
 
-    return res.status(200).json(
-      new ApiResponse(
-        200,
-        null,
-        "User logged out successfully",
-        true
-      )
-    );
+    return res
+      .status(200)
+      .json(new ApiResponse(200, null, "User logged out successfully", true));
   } catch (error) {
     console.error("Logout failed:", error.message);
 
@@ -385,14 +429,16 @@ const logoutUser = async (req, res) => {
     res.clearCookie("accessToken", cookieOptions);
     res.clearCookie("refreshToken", cookieOptions);
 
-    return res.status(500).json(
-      new ApiResponse(
-        500,
-        null,
-        "Logout could not be completed. Please try again.",
-        false
-      )
-    );
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          "Logout could not be completed. Please try again.",
+          false
+        )
+      );
   }
 };
 
@@ -407,9 +453,7 @@ const sendPasswordResetOTP = async (req, res) => {
     if (typeof email !== "string" || !email.trim()) {
       return res
         .status(400)
-        .json(
-          new ApiResponse(400, null, "Valid email is required", false)
-        );
+        .json(new ApiResponse(400, null, "Valid email is required", false));
     }
 
     const normalizedEmail = email.trim().toLowerCase();
@@ -450,9 +494,7 @@ const sendPasswordResetOTP = async (req, res) => {
     }
 
     // 5. Generate cryptographically secure OTP
-    const passwordResetOTP = crypto
-      .randomInt(100000, 1000000)
-      .toString();
+    const passwordResetOTP = crypto.randomInt(100000, 1000000).toString();
 
     // 6. Hash OTP
     const hashedOTP = await bcrypt.hash(passwordResetOTP, 10);
@@ -468,10 +510,7 @@ const sendPasswordResetOTP = async (req, res) => {
     } catch (emailError) {
       await deleteCache(otpKey);
 
-      console.error(
-        "Password reset email failed:",
-        emailError.message
-      );
+      console.error("Password reset email failed:", emailError.message);
 
       return res
         .status(200)
@@ -728,7 +767,6 @@ const changePassword = async (req, res) => {
   }
 };
 
-
 const refreshAccessToken = async (req, res) => {
   try {
     const incomingRefreshToken = req.cookies?.refreshToken;
@@ -898,7 +936,6 @@ const refreshAccessToken = async (req, res) => {
       );
   }
 };
-
 
 const updateUserProfile = async (req, res) => {
   try {
@@ -1215,7 +1252,6 @@ const getCurrentUser = async (req, res) => {
  *          Permanent purge is handled by a background job after the grace period.
  */
 
-
 // * -------------------------------------------------pending understand this ------------------------------------------------------------------------
 const deleteMyAccount = async (req, res, next) => {
   const GRACE_PERIOD_DAYS = 30;
@@ -1367,8 +1403,7 @@ const searchUser = async (req, res) => {
   }
 };
 
-
-//save otp inside redis not db 
+//save otp inside redis not db
 
 const generateEmailVerificationOtp = async (req, res) => {
   let cacheKey;
@@ -1396,9 +1431,7 @@ const generateEmailVerificationOtp = async (req, res) => {
     if (user.isVerified) {
       return res
         .status(409)
-        .json(
-          new ApiResponse(409, null, "Email is already verified", false)
-        );
+        .json(new ApiResponse(409, null, "Email is already verified", false));
     }
 
     // STEP 4: Define Redis keys
@@ -1440,10 +1473,7 @@ const generateEmailVerificationOtp = async (req, res) => {
     } catch (emailError) {
       await deleteCache(cacheKey);
 
-      console.error(
-        "Email verification delivery failed:",
-        emailError.message
-      );
+      console.error("Email verification delivery failed:", emailError.message);
 
       return res
         .status(500)
@@ -1461,29 +1491,14 @@ const generateEmailVerificationOtp = async (req, res) => {
     return res
       .status(200)
       .json(
-        new ApiResponse(
-          200,
-          null,
-          "Verification OTP sent successfully",
-          true
-        )
+        new ApiResponse(200, null, "Verification OTP sent successfully", true)
       );
   } catch (error) {
-    console.error(
-      "Generate email verification OTP failed:",
-      error.message
-    );
+    console.error("Generate email verification OTP failed:", error.message);
 
     return res
       .status(500)
-      .json(
-        new ApiResponse(
-          500,
-          null,
-          "Internal server error",
-          false
-        )
-      );
+      .json(new ApiResponse(500, null, "Internal server error", false));
   }
 };
 const verifyEmail = async (req, res) => {
@@ -1617,7 +1632,6 @@ const verifyEmail = async (req, res) => {
 // Generate OTP for Email Update
 // ============================================================
 
-
 const generateUpdateEmailOtp = async (req, res) => {
   let otpKey;
   let cooldownKey;
@@ -1628,26 +1642,24 @@ const generateUpdateEmailOtp = async (req, res) => {
     const userId = req.user?.userId;
 
     if (!userId) {
-      return res.status(401).json(
-        new ApiResponse(401, null, "Unauthorized", false)
-      );
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
     }
 
     if (!mongoose.Types.ObjectId.isValid(userId)) {
-      return res.status(400).json(
-        new ApiResponse(400, null, "Invalid user ID", false)
-      );
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid user ID", false));
     }
 
     // 2. Find the authenticated user
-    const user = await User.findById(userId)
-      .select("_id name email")
-      .lean();
+    const user = await User.findById(userId).select("_id name email").lean();
 
     if (!user) {
-      return res.status(404).json(
-        new ApiResponse(404, null, "User not found", false)
-      );
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
     }
 
     // 3. Define Redis keys
@@ -1658,47 +1670,44 @@ const generateUpdateEmailOtp = async (req, res) => {
     const existingOtp = await getCache(otpKey);
 
     if (existingOtp) {
-      return res.status(429).json(
-        new ApiResponse(
-          429,
-          null,
-          "An OTP has already been sent. Please check your email.",
-          false
-        )
-      );
+      return res
+        .status(429)
+        .json(
+          new ApiResponse(
+            429,
+            null,
+            "An OTP has already been sent. Please check your email.",
+            false
+          )
+        );
     }
 
     // 5. Atomically acquire a 60-second cooldown
     // Use the Redis client exposed by your existing Redis service.
     // Adapt this call if your service uses a different API.
-    const cooldownAcquired = await setCache(
-      cooldownKey,
-      "1",
-      {
-        NX: true,
-        EX: 60,
-      }
-    );
+    const cooldownAcquired = await setCache(cooldownKey, "1", {
+      NX: true,
+      EX: 60,
+    });
 
     if (cooldownAcquired !== "OK") {
-      return res.status(429).json(
-        new ApiResponse(
-          429,
-          null,
-          "Please wait before requesting another OTP.",
-          false
-        )
-      );
+      return res
+        .status(429)
+        .json(
+          new ApiResponse(
+            429,
+            null,
+            "Please wait before requesting another OTP.",
+            false
+          )
+        );
     }
 
     // 6. Generate a cryptographically secure six-digit OTP
     const otp = crypto.randomInt(100000, 1000000).toString();
 
     // 7. Hash OTP using SHA-256 before Redis storage
-    const hashedOtp = crypto
-      .createHash("sha256")
-      .update(otp)
-      .digest("hex");
+    const hashedOtp = crypto.createHash("sha256").update(otp).digest("hex");
 
     // 8. Store the hash with a five-minute expiration
     await setCache(otpKey, hashedOtp, 300);
@@ -1709,35 +1718,33 @@ const generateUpdateEmailOtp = async (req, res) => {
       await sendUpdateEmailOtp(user, otp);
     } catch (emailError) {
       // Invalidate the OTP and cooldown if email sending fails
-      await Promise.allSettled([
-        deleteCache(otpKey),
-        deleteCache(cooldownKey),
-      ]);
+      await Promise.allSettled([deleteCache(otpKey), deleteCache(cooldownKey)]);
 
-      console.error(
-        "Update email OTP delivery failed:",
-        emailError.message
-      );
+      console.error("Update email OTP delivery failed:", emailError.message);
 
-      return res.status(500).json(
-        new ApiResponse(
-          500,
-          null,
-          "Unable to send OTP. Please try again later.",
-          false
-        )
-      );
+      return res
+        .status(500)
+        .json(
+          new ApiResponse(
+            500,
+            null,
+            "Unable to send OTP. Please try again later.",
+            false
+          )
+        );
     }
 
     // 10. Return success without exposing the OTP
-    return res.status(200).json(
-      new ApiResponse(
-        200,
-        null,
-        "OTP sent successfully. Please check your email.",
-        true
-      )
-    );
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          null,
+          "OTP sent successfully. Please check your email.",
+          true
+        )
+      );
   } catch (error) {
     // Clean up only keys associated with this request
     const cleanup = [];
@@ -1752,19 +1759,18 @@ const generateUpdateEmailOtp = async (req, res) => {
 
     await Promise.allSettled(cleanup);
 
-    console.error(
-      "Generate update email OTP error:",
-      error.message
-    );
+    console.error("Generate update email OTP error:", error.message);
 
-    return res.status(500).json(
-      new ApiResponse(
-        500,
-        null,
-        "Unable to process your request. Please try again later.",
-        false
-      )
-    );
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          "Unable to process your request. Please try again later.",
+          false
+        )
+      );
   }
 };
 
@@ -1781,14 +1787,7 @@ const verifyUpdateEmailOtp = async (req, res) => {
     if (!userId) {
       return res
         .status(401)
-        .json(
-          new ApiResponse(
-            401,
-            null,
-            "Unauthorized",
-            false
-          )
-        );
+        .json(new ApiResponse(401, null, "Unauthorized", false));
     }
 
     // ----------------------------------------------------------
@@ -1804,14 +1803,7 @@ const verifyUpdateEmailOtp = async (req, res) => {
     if (!mongoose.Types.ObjectId.isValid(userId)) {
       return res
         .status(400)
-        .json(
-          new ApiResponse(
-            400,
-            null,
-            "Invalid user id",
-            false
-          )
-        );
+        .json(new ApiResponse(400, null, "Invalid user id", false));
     }
 
     // ----------------------------------------------------------
@@ -1822,12 +1814,7 @@ const verifyUpdateEmailOtp = async (req, res) => {
       return res
         .status(400)
         .json(
-          new ApiResponse(
-            400,
-            null,
-            "OTP must be a valid 6-digit code",
-            false
-          )
+          new ApiResponse(400, null, "OTP must be a valid 6-digit code", false)
         );
     }
 
@@ -1838,21 +1825,13 @@ const verifyUpdateEmailOtp = async (req, res) => {
     if (!email || typeof email !== "string") {
       return res
         .status(400)
-        .json(
-          new ApiResponse(
-            400,
-            null,
-            "Email is required",
-            false
-          )
-        );
+        .json(new ApiResponse(400, null, "Email is required", false));
     }
 
     const normalizedEmail = email.trim().toLowerCase();
 
     // Basic email validation
-    const emailRegex =
-      /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
     if (!emailRegex.test(normalizedEmail)) {
       return res
@@ -1873,8 +1852,7 @@ const verifyUpdateEmailOtp = async (req, res) => {
 
     const otpKey = updateEmailOtp(userId);
 
-    const attemptKey =
-      `update-email-otp:attempts:${userId}`;
+    const attemptKey = `update-email-otp:attempts:${userId}`;
 
     // ----------------------------------------------------------
     // 7. Get stored hashed OTP
@@ -1886,12 +1864,7 @@ const verifyUpdateEmailOtp = async (req, res) => {
       return res
         .status(400)
         .json(
-          new ApiResponse(
-            400,
-            null,
-            "OTP has expired or was not found",
-            false
-          )
+          new ApiResponse(400, null, "OTP has expired or was not found", false)
         );
     }
 
@@ -1901,8 +1874,7 @@ const verifyUpdateEmailOtp = async (req, res) => {
     // Maximum 5 incorrect attempts.
     // ----------------------------------------------------------
 
-    const attempts =
-      Number(await getCache(attemptKey)) || 0;
+    const attempts = Number(await getCache(attemptKey)) || 0;
 
     if (attempts >= 5) {
       await deleteCache(otpKey);
@@ -1924,37 +1896,25 @@ const verifyUpdateEmailOtp = async (req, res) => {
     // 9. Hash submitted OTP
     // ----------------------------------------------------------
 
-    const hashedOtp = crypto
-      .createHash("sha256")
-      .update(otp)
-      .digest("hex");
+    const hashedOtp = crypto.createHash("sha256").update(otp).digest("hex");
 
     // ----------------------------------------------------------
     // 10. Compare OTP securely
     // ----------------------------------------------------------
 
-    const storedBuffer =
-      Buffer.from(storedHashedOtp, "hex");
+    const storedBuffer = Buffer.from(storedHashedOtp, "hex");
 
-    const providedBuffer =
-      Buffer.from(hashedOtp, "hex");
+    const providedBuffer = Buffer.from(hashedOtp, "hex");
 
     const isOtpValid =
       storedBuffer.length === providedBuffer.length &&
-      crypto.timingSafeEqual(
-        storedBuffer,
-        providedBuffer
-      );
+      crypto.timingSafeEqual(storedBuffer, providedBuffer);
 
     if (!isOtpValid) {
       const newAttempts = attempts + 1;
 
       // Keep attempt counter for the remaining OTP lifetime.
-      await setCache(
-        attemptKey,
-        newAttempts.toString(),
-        300
-      );
+      await setCache(attemptKey, newAttempts.toString(), 300);
 
       if (newAttempts >= 5) {
         await deleteCache(otpKey);
@@ -1974,14 +1934,7 @@ const verifyUpdateEmailOtp = async (req, res) => {
 
       return res
         .status(400)
-        .json(
-          new ApiResponse(
-            400,
-            null,
-            "Invalid OTP",
-            false
-          )
-        );
+        .json(new ApiResponse(400, null, "Invalid OTP", false));
     }
 
     // ----------------------------------------------------------
@@ -2008,9 +1961,7 @@ const verifyUpdateEmailOtp = async (req, res) => {
       // 13. Check if new email is same as current email
       // --------------------------------------------------------
 
-      if (
-        user.email.toLowerCase() === normalizedEmail
-      ) {
+      if (user.email.toLowerCase() === normalizedEmail) {
         throw new Error("SAME_EMAIL");
       }
 
@@ -2071,27 +2022,23 @@ const verifyUpdateEmailOtp = async (req, res) => {
     await Promise.allSettled([
       deleteCache(otpKey),
       deleteCache(attemptKey),
-      deleteCache(
-        `update-email-otp:cooldown:${userId}`
-      ),
+      deleteCache(`update-email-otp:cooldown:${userId}`),
     ]);
 
     // ----------------------------------------------------------
     // 18. Return success
     // ----------------------------------------------------------
 
-    return res
-      .status(200)
-      .json(
-        new ApiResponse(
-          200,
-          {
-            email: updatedUser.email,
-          },
-          "Email updated successfully",
-          true
-        )
-      );
+    return res.status(200).json(
+      new ApiResponse(
+        200,
+        {
+          email: updatedUser.email,
+        },
+        "Email updated successfully",
+        true
+      )
+    );
   } catch (error) {
     // ----------------------------------------------------------
     // Handle known errors
@@ -2100,14 +2047,7 @@ const verifyUpdateEmailOtp = async (req, res) => {
     if (error.message === "USER_NOT_FOUND") {
       return res
         .status(404)
-        .json(
-          new ApiResponse(
-            404,
-            null,
-            "User not found",
-            false
-          )
-        );
+        .json(new ApiResponse(404, null, "User not found", false));
     }
 
     if (error.message === "SAME_EMAIL") {
@@ -2127,35 +2067,19 @@ const verifyUpdateEmailOtp = async (req, res) => {
       return res
         .status(409)
         .json(
-          new ApiResponse(
-            409,
-            null,
-            "This email is already registered",
-            false
-          )
+          new ApiResponse(409, null, "This email is already registered", false)
         );
     }
 
-    console.error(
-      "Verify update email OTP error:",
-      error.message
-    );
+    console.error("Verify update email OTP error:", error.message);
 
     return res
       .status(500)
-      .json(
-        new ApiResponse(
-          500,
-          null,
-          "Failed to update email",
-          false
-        )
-      );
+      .json(new ApiResponse(500, null, "Failed to update email", false));
   } finally {
     await session.endSession();
   }
 };
-
 
 const getUserStats = async (req, res) => {
   try {
@@ -2191,7 +2115,7 @@ const getUserStats = async (req, res) => {
         .json(
           new ApiResponse(
             200,
-           cachedStats,
+            cachedStats,
             "User stats fetched successfully",
             true
           )
@@ -2396,7 +2320,6 @@ const getUserStats = async (req, res) => {
       .json(new ApiResponse(500, null, "Failed to fetch user stats", false));
   }
 };
-
 
 const getUserActivity = async (req, res) => {
   try {
@@ -2724,7 +2647,6 @@ const getUserNotifications = async (req, res) => {
   }
 };
 
-
 const getUserSessions = async (req, res) => {
   try {
     // 1. Validate authenticated user
@@ -2923,15 +2845,15 @@ const markAllNotificationsAsRead = async (req, res) => {
     const userId = req.user?.userId;
 
     if (!userId) {
-      return res.status(401).json(
-        new ApiResponse(401, null, "Unauthorized", false)
-      );
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
     }
 
     if (!mongoose.Types.ObjectId.isValid(userId)) {
-      return res.status(400).json(
-        new ApiResponse(400, null, "Invalid user ID", false)
-      );
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid user ID", false));
     }
 
     // 2. Mark all unread notifications as read
@@ -2977,22 +2899,20 @@ const markAllNotificationsAsRead = async (req, res) => {
       )
     );
   } catch (error) {
-    console.error(
-      "markAllNotificationsAsRead error:",
-      error.message
-    );
+    console.error("markAllNotificationsAsRead error:", error.message);
 
-    return res.status(500).json(
-      new ApiResponse(
-        500,
-        null,
-        "Failed to mark all notifications as read",
-        false
-      )
-    );
+    return res
+      .status(500)
+      .json(
+        new ApiResponse(
+          500,
+          null,
+          "Failed to mark all notifications as read",
+          false
+        )
+      );
   }
 };
-
 
 const resendEmailVerificationOTP = async (req, res) => {
   let otpKey;
@@ -3140,7 +3060,6 @@ const resendEmailVerificationOTP = async (req, res) => {
   }
 };
 
-
 // ----------------------------------------------------------
 // Revoke a specific user session
 // Route example: DELETE /api/v1/users/sessions/:sessionId
@@ -3156,18 +3075,14 @@ export const sessionRevocation = async (req, res) => {
     if (!userId) {
       return res
         .status(401)
-        .json(
-          new ApiResponse(401, null, "Authentication required", false)
-        );
+        .json(new ApiResponse(401, null, "Authentication required", false));
     }
 
     // 2. Validate session ID before querying MongoDB
     if (!sessionId || !mongoose.isValidObjectId(sessionId)) {
       return res
         .status(400)
-        .json(
-          new ApiResponse(400, null, "Invalid session ID", false)
-        );
+        .json(new ApiResponse(400, null, "Invalid session ID", false));
     }
 
     const now = new Date();
@@ -3198,14 +3113,7 @@ export const sessionRevocation = async (req, res) => {
     if (!revokedSession) {
       return res
         .status(404)
-        .json(
-          new ApiResponse(
-            404,
-            null,
-            "Active session not found",
-            false
-          )
-        );
+        .json(new ApiResponse(404, null, "Active session not found", false));
     }
 
     // 4. If the user revoked their CURRENT session,
@@ -3223,27 +3131,22 @@ export const sessionRevocation = async (req, res) => {
     }
 
     // 5. Return a safe response; never expose tokens.
-    return res.status(200).json(
-      new ApiResponse(
-        200,
-        { sessionId: revokedSession._id },
-        "Session revoked successfully",
-        true
-      )
-    );
+    return res
+      .status(200)
+      .json(
+        new ApiResponse(
+          200,
+          { sessionId: revokedSession._id },
+          "Session revoked successfully",
+          true
+        )
+      );
   } catch (error) {
     console.error("Session revocation error:", error);
 
     return res
       .status(500)
-      .json(
-        new ApiResponse(
-          500,
-          null,
-          "Unable to revoke session",
-          false
-        )
-      );
+      .json(new ApiResponse(500, null, "Unable to revoke session", false));
   }
 };
 
@@ -3413,14 +3316,196 @@ const restoreMyAccount = async (req, res, next) => {
   }
 };
 
+export const securityEvents = async (req, res) => {
+  try {
+    // 1. Ensure the authenticated user exists.
+    const userId = req.user?.userId;
 
+    if (!userId || !mongoose.isValidObjectId(userId)) {
+      return res.status(401).json({
+        success: false,
+        message: "Authentication required.",
+      });
+    }
 
-// * Agla step
-// * Tum mujhe apni cacheInvalidationAudit ki current file ya uska related controller code bhej do. Agar function abhi empty hai, to user.auth.controller.js aur todo/subtask controllers ke woh functions bhejo jo data create, update, delete ya complete karte hain.
-// *   Phir hum tumhare actual FlowDo implementation ke mutabiq audit design karenge—pehle concept aur dependency mapping, phir production-ready code 
+    // 2. Parse pagination parameters.
+    const page = Number(req.query.page ?? 1);
+    const limit = Number(req.query.limit ?? 20);
 
-const securityEvents = async (req,res) => {}
+    if (
+      !Number.isSafeInteger(page) ||
+      !Number.isSafeInteger(limit) ||
+      page < 1 ||
+      limit < 1 ||
+      limit > 100
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Page must be positive and limit must be between 1 and 100.",
+      });
+    }
 
+    const skip = (page - 1) * limit;
+
+    if (!Number.isSafeInteger(skip)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid pagination parameters.",
+      });
+    }
+
+    // 3. Build a filter scoped to the authenticated user.
+    const filter = { userId };
+
+    const { eventType, outcome, severity, from, to } = req.query;
+
+    const EVENT_TYPES = [
+      "LOGIN_SUCCESS",
+      "LOGIN_FAILED",
+      "LOGOUT",
+      "PASSWORD_CHANGED",
+      "PASSWORD_CHANGE_FAILED",
+      "PASSWORD_RESET_REQUESTED",
+      "PASSWORD_RESET_COMPLETED",
+      "EMAIL_VERIFICATION_SUCCEEDED",
+      "EMAIL_CHANGED",
+      "EMAIL_CHANGE_FAILED",
+      "SESSION_CREATED",
+      "SESSION_REVOKED",
+      "ALL_SESSIONS_REVOKED",
+      "ACCOUNT_LOCKED",
+      "ACCOUNT_UNLOCKED",
+      "ACCOUNT_DELETED",
+      "SUSPICIOUS_ACTIVITY",
+      "ACCESS_DENIED",
+    ];
+
+    const OUTCOMES = ["SUCCESS", "FAILURE", "BLOCKED"];
+
+    const SEVERITIES = ["LOW", "MEDIUM", "HIGH", "CRITICAL"];
+
+    if (eventType !== undefined) {
+      if (typeof eventType !== "string" || !EVENT_TYPES.includes(eventType)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid security event type.",
+        });
+      }
+
+      filter.eventType = eventType;
+    }
+
+    if (outcome !== undefined) {
+      if (typeof outcome !== "string" || !OUTCOMES.includes(outcome)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid event outcome.",
+        });
+      }
+
+      filter.outcome = outcome;
+    }
+
+    if (severity !== undefined) {
+      if (typeof severity !== "string" || !SEVERITIES.includes(severity)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid event severity.",
+        });
+      }
+
+      filter.severity = severity;
+    }
+
+    // 4. Apply an optional date range.
+    if (from !== undefined || to !== undefined) {
+      const startDate = from !== undefined ? new Date(from) : null;
+      const endDate = to !== undefined ? new Date(to) : null;
+
+      if (
+        (startDate &&
+          (typeof from !== "string" ||
+            !Number.isFinite(startDate.getTime()))) ||
+        (endDate &&
+          (typeof to !== "string" || !Number.isFinite(endDate.getTime())))
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid date filter.",
+        });
+      }
+
+      if (startDate && endDate && startDate > endDate) {
+        return res.status(400).json({
+          success: false,
+          message: "'from' must be before or equal to 'to'.",
+        });
+      }
+
+      filter.createdAt = {};
+
+      if (startDate) {
+        filter.createdAt.$gte = startDate;
+      }
+
+      if (endDate) {
+        filter.createdAt.$lte = endDate;
+      }
+    }
+
+    // 5. Fetch events and count matching records.
+    const [events, total] = await Promise.all([
+      SecurityEvent.find(filter)
+        .select(
+          [
+            "_id",
+            "eventType",
+            "source",
+            "outcome",
+            "severity",
+            "ipAddress",
+            "userAgent",
+            "requestId",
+            "metadata",
+            "createdAt",
+          ].join(" ")
+        )
+        .sort({ createdAt: -1, _id: -1 })
+        .skip(skip)
+        .limit(limit)
+        .maxTimeMS(5000)
+        .lean()
+        .exec(),
+
+      SecurityEvent.countDocuments(filter).maxTimeMS(5000).exec(),
+    ]);
+
+    // 6. Return paginated results.
+    return res.status(200).json({
+      success: true,
+      message: "Security events retrieved successfully.",
+      data: {
+        events,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit),
+          hasNextPage: page * limit < total,
+          hasPreviousPage: page > 1,
+        },
+      },
+    });
+  } catch (error) {
+    // Do not expose internal database errors to clients.
+    console.error("Security events controller error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Unable to retrieve security events.",
+    });
+  }
+};
 
 export {
   registerUser,

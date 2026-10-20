@@ -8,6 +8,7 @@
     "dev": "nodemon server.js",
     "start": "node server.js",
     "swagger": "node ./src/service/swagger.js",
+    "worker": "node jobs/dataExport.worker.js",
     "benchmark": "autocannon http://localhost:5000"
   },
   "keywords": [],
