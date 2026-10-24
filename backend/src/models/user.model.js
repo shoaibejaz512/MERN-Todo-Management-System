@@ -2,6 +2,50 @@ import mongoose from "mongoose";
 import bcryptjs from "bcryptjs";
 import { emailRegex } from "../constants.js";
 
+
+const mfaSchema = new mongoose.Schema(
+  {
+    twoFactorEnabled: {
+      type: Boolean,
+      default: false,
+    },
+
+    secretEncrypted: {
+      type: String,
+      select: false,
+    },
+
+    pendingSecretEncrypted: {
+      type: String,
+      select: false,
+    },
+
+    pendingExpiresAt: {
+      type: Date,
+      select: false,
+    },
+
+    enabledAt: {
+      type: Date,
+    },
+
+    lastTotpStep: {
+      type: Number,
+      select: false,
+    },
+
+    recoveryCodeHashes: {
+      type: [String],
+      default: [],
+      select: false,
+    },
+  },
+  { _id: false }
+);
+
+
+
+
 const refreshTokenSchema = new mongoose.Schema(
   {
     token: {
@@ -120,6 +164,10 @@ const userSchema = new mongoose.Schema(
     isDeleted: { type: Boolean, default: false, index: true },
     deletedAt: { type: Date, default: null },
     scheduledPurgeAt: { type: Date, default: null, index: true },
+    mfa: {
+      type: mfaSchema,
+      default: () => ({}),
+    },
   },
   { timestamps: true }
 );

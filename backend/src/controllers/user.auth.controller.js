@@ -15,7 +15,13 @@ import { clearAuthCookies } from "../utils/clearAuthCookies.js";
 import Session from "../models/user.session.model.js";
 import SecurityEvent from "../models/securityEvent.model.js";
 import { clearLoginAttemptState } from "../middlewares/loginBruteForce.js";
-
+import {
+  signAccessToken,
+  signRefreshToken,
+  verifyRefreshToken,
+  hashRefreshToken,
+} from "../utils/token.utils.js";
+import {REFRESH_TOKEN_TTL_MS} from "../constants.js";
 import {
   getCache,
   setCache,
@@ -107,11 +113,6 @@ const registerUser = async (req, res) => {
   }
 };
 
-
-import { clearLoginAttemptState } from "../utils/loginAttempt.js";
-
-const REFRESH_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-
 // Best-effort recording for failed credential checks.
 // Apply login rate limiting before this controller to prevent abuse.
 const recordFailedLogin = async (req, userId = null) => {
@@ -141,7 +142,7 @@ const recordFailedLogin = async (req, userId = null) => {
 // ==========================================================
 
 
-export const loginUser = async (req, res) => {
+const loginUser = async (req, res) => {
   let mongoSession;
 
   try {
@@ -767,62 +768,109 @@ const changePassword = async (req, res) => {
   }
 };
 
+
+// TODO:SEPRATE THE CODE OF THIS CONTROLLER IN GOO WAY 
+
+const ACCESS_SECRET = process.env.JWT_ACCESS_SECRET;
+const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
+
+if (!ACCESS_SECRET || !REFRESH_SECRET) {
+  throw new Error("JWT secrets must be configured");
+}
+
+
+const hashToken = (token) =>
+  crypto.createHash("sha256").update(token, "utf8").digest("hex");
+
+
+const hashesMatch = (incomingHash, storedHash) => {
+  if (typeof storedHash !== "string" || !/^[a-f0-9]{64}$/i.test(storedHash)) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(
+    Buffer.from(incomingHash, "hex"),
+    Buffer.from(storedHash, "hex")
+  );
+};
+
+const unauthorized = (res, message) =>
+  res.status(401).json(new ApiResponse(401, null, message, false));
+
+const clearCookiesAndReject = (res, message) => {
+  clearAuthCookies(res);
+  return unauthorized(res, message);
+};
+
+// Never log raw access or refresh tokens.
+const logSuspiciousRefresh = ({ userId, sessionId, req }) => {
+  console.warn(
+    JSON.stringify({
+      event: "REFRESH_TOKEN_REUSE_SUSPECTED",
+      userId: String(userId),
+      sessionId: String(sessionId),
+      ipAddress: req.ip,
+      userAgent: req.get("user-agent"),
+      timestamp: new Date().toISOString(),
+    })
+  );
+};
+
+
 const refreshAccessToken = async (req, res) => {
+  const incomingToken = req.cookies?.refreshToken;
+
+  if (!incomingToken) {
+    clearAuthCookies(res);
+
+    return unauthorized(res, "Refresh token is required. Please log in again.");
+  }
+
+  let decoded;
+
   try {
-    const incomingRefreshToken = req.cookies?.refreshToken;
+    decoded = jwt.verify(incomingToken, REFRESH_SECRET, {
+      algorithms: ["HS256"],
+    });
+  } catch (error) {
+    clearAuthCookies(res);
 
-    if (!incomingRefreshToken) {
-      return res
-        .status(401)
-        .json(new ApiResponse(401, null, "Refresh token is required", false));
-    }
+    const message =
+      error.name === "TokenExpiredError"
+        ? "Refresh token expired. Please log in again."
+        : "Invalid refresh token. Please log in again.";
 
-    // 1. Verify refresh token
-    let decoded;
+    return unauthorized(res, message);
+  }
 
-    try {
-      decoded = jwt.verify(
-        incomingRefreshToken,
-        process.env.JWT_REFRESH_SECRET,
-        { algorithms: ["HS256"] }
-      );
-    } catch (error) {
-      const message =
-        error.name === "TokenExpiredError"
-          ? "Refresh token expired. Please log in again."
-          : "Invalid refresh token";
+  if (
+    !decoded ||
+    typeof decoded === "string" ||
+    !decoded.userId ||
+    !decoded.sessionId ||
+    !mongoose.isValidObjectId(decoded.userId) ||
+    !mongoose.isValidObjectId(decoded.sessionId) ||
+    typeof decoded.jti !== "string" ||
+    !decoded.jti
+  ) {
+    return clearCookiesAndReject(res, "Invalid refresh token payload.");
+  }
 
-      return res.status(401).json(new ApiResponse(401, null, message, false));
-    }
+  const now = new Date();
+  const incomingHash = hashToken(incomingToken);
 
-    // 2. Validate token payload
-    if (
-      !decoded?.userId ||
-      !decoded?.sessionId ||
-      !mongoose.isValidObjectId(decoded.userId) ||
-      !mongoose.isValidObjectId(decoded.sessionId)
-    ) {
-      return res
-        .status(401)
-        .json(
-          new ApiResponse(401, null, "Invalid refresh token payload", false)
-        );
-    }
-
-    // 3. Verify user exists
+  try {
     const userExists = await User.exists({
       _id: decoded.userId,
     });
 
     if (!userExists) {
-      return res
-        .status(401)
-        .json(new ApiResponse(401, null, "Invalid refresh token", false));
+      return clearCookiesAndReject(
+        res,
+        "Invalid refresh token. Please log in again."
+      );
     }
 
-    const now = new Date();
-
-    // 4. Find active session
     const session = await Session.findOne({
       _id: decoded.sessionId,
       user: decoded.userId,
@@ -831,65 +879,65 @@ const refreshAccessToken = async (req, res) => {
     }).select("+refreshTokenHash");
 
     if (!session) {
-      return res
-        .status(401)
-        .json(
-          new ApiResponse(
-            401,
-            null,
-            "Session is invalid, expired, or revoked",
-            false
-          )
-        );
+      return clearCookiesAndReject(
+        res,
+        "Session expired or revoked. Please log in again."
+      );
     }
 
-    // 5. Verify refresh token hash
-    const incomingTokenHash = crypto
-      .createHash("sha256")
-      .update(incomingRefreshToken)
-      .digest("hex");
+    // A valid signed token with a different current hash
+    // is suspicious. Revoke only this affected session.
+    if (!hashesMatch(incomingHash, session.refreshTokenHash)) {
+      const revokeResult = await Session.updateOne(
+        {
+          _id: session._id,
+          user: decoded.userId,
+          revokedAt: null,
+          refreshTokenHash: session.refreshTokenHash,
+        },
+        {
+          $set: { revokedAt: new Date() },
+        }
+      );
 
-    const storedTokenHash = session.refreshTokenHash;
+      if (revokeResult.modifiedCount === 1) {
+        logSuspiciousRefresh({
+          userId: decoded.userId,
+          sessionId: decoded.sessionId,
+          req,
+        });
+      }
 
-    if (
-      typeof storedTokenHash !== "string" ||
-      !/^[a-f0-9]{64}$/i.test(storedTokenHash) ||
-      !crypto.timingSafeEqual(
-        Buffer.from(incomingTokenHash, "hex"),
-        Buffer.from(storedTokenHash, "hex")
-      )
-    ) {
-      return res
-        .status(401)
-        .json(new ApiResponse(401, null, "Invalid refresh token", false));
+      return clearCookiesAndReject(
+        res,
+        "Refresh token reuse suspected. Please log in again."
+      );
     }
 
-    // 6. Generate new tokens for the same session
     const user = { _id: decoded.userId };
+    const sessionId = session._id;
 
-    const newAccessToken = signAccessToken(user, session._id);
-    const newRefreshToken = signRefreshToken(user, session._id);
+    const newAccessToken = signAccessToken(user, sessionId);
+    const newRefreshToken = signRefreshToken(user, sessionId);
+    const newRefreshHash = hashToken(newRefreshToken);
 
-    const newRefreshTokenHash = crypto
-      .createHash("sha256")
-      .update(newRefreshToken)
-      .digest("hex");
+    // Prevent accidental no-op rotation.
+    if (newRefreshHash === incomingHash) {
+      throw new Error("Refresh-token rotation generated an identical token");
+    }
 
-    const newExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-
-    // 7. Atomically rotate refresh token
     const updatedSession = await Session.findOneAndUpdate(
       {
         _id: session._id,
         user: decoded.userId,
-        refreshTokenHash: incomingTokenHash,
         revokedAt: null,
         expiresAt: { $gt: new Date() },
+        refreshTokenHash: incomingHash,
       },
       {
         $set: {
-          refreshTokenHash: newRefreshTokenHash,
-          expiresAt: newExpiresAt,
+          refreshTokenHash: newRefreshHash,
+          expiresAt: new Date(Date.now() + REFRESH_TOKEN_TTL_MS),
           lastActiveAt: new Date(),
         },
       },
@@ -900,22 +948,18 @@ const refreshAccessToken = async (req, res) => {
     ).select("_id");
 
     if (!updatedSession) {
-      return res
-        .status(401)
-        .json(
-          new ApiResponse(
-            401,
-            null,
-            "Session is no longer active. Please log in again.",
-            false
-          )
-        );
+      // Another request may have rotated the token first.
+      // Reject this request; do not issue its generated tokens.
+      clearAuthCookies(res);
+
+      return unauthorized(
+        res,
+        "Refresh request could not be completed. Please log in again."
+      );
     }
 
-    // 8. Set authentication cookies
     setAuthCookies(res, newAccessToken, newRefreshToken);
 
-    // 9. Send response
     return res
       .status(200)
       .json(
@@ -927,12 +971,20 @@ const refreshAccessToken = async (req, res) => {
         )
       );
   } catch (error) {
+    // Database failures are not proof of token theft.
     console.error("refreshAccessToken error:", error.message);
 
+    clearAuthCookies(res);
+
     return res
-      .status(500)
+      .status(503)
       .json(
-        new ApiResponse(500, null, "Unable to refresh access token", false)
+        new ApiResponse(
+          503,
+          null,
+          "Authentication service temporarily unavailable",
+          false
+        )
       );
   }
 };
@@ -3316,7 +3368,7 @@ const restoreMyAccount = async (req, res, next) => {
   }
 };
 
-export const securityEvents = async (req, res) => {
+const securityEvents = async (req, res) => {
   try {
     // 1. Ensure the authenticated user exists.
     const userId = req.user?.userId;

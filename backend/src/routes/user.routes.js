@@ -76,4 +76,49 @@ router.get(
   cacheInvalidationAudit
 );
 
+
+
+// TODO: PENDING AFTER COMPLETING THSI ROUTES ONLY MFA/2FA FEATURE IMPLEMENTED
+
+// router.post("/setup", verifyJWT, beginMfaSetup);
+
+// router.post(
+//   "/setup/confirm",
+//   verifyJWT,
+//   validateTotpBody,
+//   confirmMfaSetup
+// );
+
+// router.post(
+//   "/verify",
+//   verifyJWT,
+//   validateTotpBody,
+//   verifyMfaCode
+// );
+
+// router.post(
+//   "/recovery/verify",
+//   verifyJWT,
+//   validateRecoveryCodeBody,
+//   verifyRecoveryCode
+// );
+
+// router.post(
+//   "/disable",
+//   verifyJWT,
+//   requireRecentAuth(),
+//   validateTotpBody,
+//   disableMfa
+// );
+
+// router.post(
+//   "/recovery/regenerate",
+//   verifyJWT,
+//   requireRecentAuth(),
+//   validateTotpBody,
+//   regenerateRecoveryCodes
+// );
+
+
+
 export default router;

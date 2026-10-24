@@ -1,43 +1,18 @@
+import crypto from "node:crypto";
 import jwt from "jsonwebtoken";
-
-// ----------------------------------------------------------
-// JWT Secrets
-// ----------------------------------------------------------
 
 const ACCESS_SECRET = process.env.JWT_ACCESS_SECRET;
 const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
 
-// ----------------------------------------------------------
-// Validate JWT secrets at application startup
-// ----------------------------------------------------------
-
-if (!ACCESS_SECRET) {
-  throw new Error("JWT_ACCESS_SECRET is not configured");
+if (!ACCESS_SECRET || !REFRESH_SECRET) {
+  throw new Error("JWT access/refresh secrets must be configured");
 }
 
-if (!REFRESH_SECRET) {
-  throw new Error("JWT_REFRESH_SECRET is not configured");
-}
-
-// ----------------------------------------------------------
-// Sign Access Token
-// ----------------------------------------------------------
-// Lifetime: 15 minutes
-//
-// Payload:
-// {
-//   userId,
-//   sessionId
-// }
-// ----------------------------------------------------------
+const JWT_ALGORITHM = "HS256";
 
 export function signAccessToken(user, sessionId) {
-  if (!user?._id) {
-    throw new Error("User ID is required to generate access token");
-  }
-
-  if (!sessionId) {
-    throw new Error("Session ID is required to generate access token");
+  if (!user?._id || !sessionId) {
+    throw new Error("User ID and session ID are required");
   }
 
   return jwt.sign(
@@ -47,40 +22,49 @@ export function signAccessToken(user, sessionId) {
     },
     ACCESS_SECRET,
     {
+      algorithm: JWT_ALGORITHM,
       expiresIn: "15m",
     }
   );
 }
 
-// ----------------------------------------------------------
-// Sign Refresh Token
-// ----------------------------------------------------------
-// Lifetime: 7 days
-//
-// Payload:
-// {
-//   userId,
-//   sessionId
-// }
-// ----------------------------------------------------------
 
 export function signRefreshToken(user, sessionId) {
-  if (!user?._id) {
-    throw new Error("User ID is required to generate refresh token");
-  }
-
-  if (!sessionId) {
-    throw new Error("Session ID is required to generate refresh token");
+  if (!user?._id || !sessionId) {
+    throw new Error("User ID and session ID are required");
   }
 
   return jwt.sign(
     {
       userId: user._id.toString(),
       sessionId: sessionId.toString(),
+      jti: crypto.randomUUID(),
     },
     REFRESH_SECRET,
     {
+      algorithm: "HS256",
       expiresIn: "7d",
     }
   );
+}
+
+
+export function verifyRefreshToken(token) {
+  return jwt.verify(token, REFRESH_SECRET, {
+    algorithms: [JWT_ALGORITHM],
+  });
+}
+
+export function hashRefreshToken(token) {
+  return crypto.createHash("sha256").update(token, "utf8").digest("hex");
+}
+
+export function getRefreshTokenExpiry(token) {
+  const decoded = jwt.decode(token);
+
+  if (!decoded || typeof decoded.exp !== "number") {
+    throw new Error("Refresh token has no valid expiry");
+  }
+
+  return new Date(decoded.exp * 1000);
 }
