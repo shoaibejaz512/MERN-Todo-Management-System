@@ -1,4 +1,5 @@
 import "dotenv/config";
+import "./config/monitoring.js";
 
 import http from "http";
 import { Server } from "socket.io";

@@ -1427,6 +1427,7 @@ const searchUser = async (req, res) => {
         $regex: userQuery,
         $options: "i",
       },
+      isDeleted: { $ne: true } ,
     })
       .select("name email profileImage bio")
       .limit(10)
@@ -3593,3 +3594,7 @@ export {
   securityEvents,
   restoreMyAccount,
 };
+
+// 5. Monitoring and operational recovery
+
+// Add structured logs, request IDs, error monitoring, health checks, database backups, restore testing, and alerts for repeated authentication failures. Never log passwords, raw tokens, OTPs, or MFA secrets.

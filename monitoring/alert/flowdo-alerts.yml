@@ -1,0 +1,58 @@
+
+groups:
+  - name: flowdo-application-alerts
+    rules:
+
+      # High 5xx error rate
+      - alert: FlowDoHighErrorRate
+        expr: |
+          (
+            sum(rate(http_requests_total{
+              status_code=~"5.."
+            }[5m]))
+            /
+            clamp_min(
+              sum(rate(http_requests_total[5m])),
+              0.001
+            )
+          ) > 0.05
+        for: 5m
+
+        labels:
+          severity: critical
+          service: flowdo-backend
+
+        annotations:
+          summary: "FlowDo has a high HTTP error rate"
+          description: "More than 5% of HTTP requests are returning 5xx errors for 5 minutes."
+
+      # Backend down
+      - alert: FlowDoBackendDown
+        expr: up{job="flowdo-backend"} == 0
+        for: 1m
+
+        labels:
+          severity: critical
+          service: flowdo-backend
+
+        annotations:
+          summary: "FlowDo backend is down"
+          description: "Prometheus cannot scrape the FlowDo backend."
+
+      # High memory usage
+      - alert: FlowDoHighMemoryUsage
+        expr: |
+          (
+            process_resident_memory_bytes
+            /
+            (1024 * 1024 * 1024)
+          ) > 1.5
+        for: 5m
+
+        labels:
+          severity: warning
+          service: flowdo-backend
+
+        annotations:
+          summary: "FlowDo backend memory usage is high"
+          description: "Backend process is using more than 1.5 GB RAM."

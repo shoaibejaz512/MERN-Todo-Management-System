@@ -1,0 +1,59 @@
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+global:
+  smtp_smarthost: 'smtp.gmail.com:587'
+  smtp_from: 'shoaibejaz512@gmail.com'
+  smtp_auth_username: 'shoaibejaz512@gmail.com'
+  smtp_auth_password_file: '/run/secrets/smtp_password'
+  smtp_require_tls: true
+
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+route:
+  receiver: 'default-email'
+
+  group_by:
+    - alertname
+    - severity
+
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  routes:
+    - matchers:
+        - severity="critical"
+      receiver: 'critical-email'
+      repeat_interval: 30m
+
+    - matchers:
+        - severity="warning"
+      receiver: 'warning-email'
+      repeat_interval: 4h
+
+receivers:
+  - name: 'default-email'
+    email_configs:
+      - to: 'shoaibejaz512@gmail.com'
+        send_resolved: true
+        headers:
+          Subject: '{{ template "flowdo.email.subject" . }}'
+        html: '{{ template "flowdo.email.html" . }}'
+
+  - name: 'critical-email'
+    email_configs:
+      - to: 'shoaibejaz512@gmail.com'
+        send_resolved: true
+        headers:
+          Subject: '{{ template "flowdo.email.subject" . }}'
+        html: '{{ template "flowdo.email.html" . }}'
+
+  - name: 'warning-email'
+    email_configs:
+      - to: 'shoaibejaz512@gmail.com'
+        send_resolved: true
+        headers:
+          Subject: '{{ template "flowdo.email.subject" . }}'
+        html: '{{ template "flowdo.email.html" . }}'
