@@ -47,6 +47,7 @@ import { invalidateCacheWithAudit } from "../services/cacheInvalidationAudit.ser
 
 import { userKey } from "../utils/cacheKeys.js";
 import logger from "../loggers/index.js";
+import { escapeRegex } from "../utils/escaperegex.js";
 
 const registerUser = async (req, res) => {
   //get all the values
@@ -1392,61 +1393,145 @@ const deleteMyAccount = async (req, res, next) => {
 
 const searchUser = async (req, res) => {
   try {
-    const { q } = req.query;
+    const { q, page = "1", limit = "10" } = req.query;
 
-    if (!q?.trim()) {
+    // 1. Validate search query
+    if (typeof q !== "string" || !q.trim()) {
       return res
         .status(400)
         .json(new ApiResponse(400, null, "Search query is required", false));
     }
 
-    const userQuery = q.trim().toLowerCase();
+    const searchQuery = q.trim();
 
-    // Redis cache key
-    const cacheKey = `user:search:${userQuery}`;
-
-    // 1. Check Redis first
-    const cachedUsers = await getCache(cacheKey);
-
-    if (cachedUsers) {
+    if (searchQuery.length < 2 || searchQuery.length > 50) {
       return res
-        .status(200)
+        .status(400)
         .json(
           new ApiResponse(
-            200,
-            cachedUsers,
-            "Users retrieved successfully",
-            true
+            400,
+            null,
+            "Search query must be between 2 and 50 characters",
+            false
           )
         );
     }
 
-    // 2. Cache miss → search MongoDB
-    const users = await User.find({
-      name: {
-        $regex: userQuery,
-        $options: "i",
-      },
-      isDeleted: { $ne: true } ,
-    })
-      .select("name email profileImage bio")
-      .limit(10)
-      .lean();
+    // 2. Validate pagination
+    const currentPage = Number(page);
+    const pageLimit = Number(limit);
 
-    // 3. No users found
-    if (!users.length) {
+    if (
+      !Number.isSafeInteger(currentPage) ||
+      !Number.isSafeInteger(pageLimit) ||
+      currentPage < 1 ||
+      pageLimit < 1 ||
+      pageLimit > 50
+    ) {
       return res
-        .status(404)
-        .json(new ApiResponse(404, [], "No users found", false));
+        .status(400)
+        .json(
+          new ApiResponse(400, null, "Invalid pagination parameters", false)
+        );
     }
 
-    // 4. Store result in Redis for 5 minutes
-    await setCache(cacheKey, users, 300);
+    const skip = (currentPage - 1) * pageLimit;
 
-    // 5. Return users
+    // Protect against excessively large offsets
+    if (!Number.isSafeInteger(skip) || skip > 100000) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Page limit exceeded", false));
+    }
+
+    // 3. Authenticated user
+    const userId = req.user?.userId;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized", false));
+    }
+
+    // 4. Normalize search query
+    const normalizedQuery = searchQuery.toLowerCase();
+    const safeRegex = new RegExp(escapeRegex(normalizedQuery), "i");
+
+    // 5. MongoDB query
+    const filter = {
+      name: { $regex: safeRegex },
+      isDeleted: { $ne: true },
+      _id: { $ne: userId },
+    };
+
+    // 6. User-specific Redis cache key
+    const cacheKey = `user:search:v1:${userId}:${normalizedQuery}:${currentPage}:${pageLimit}`;
+
+    // 7. Check Redis (fail open if Redis is unavailable)
+    try {
+      const cachedUsers = await getCache(cacheKey);
+
+      if (cachedUsers) {
+        return res
+          .status(200)
+          .json(
+            new ApiResponse(
+              200,
+              cachedUsers,
+              "Users retrieved successfully",
+              true
+            )
+          );
+      }
+    } catch (cacheError) {
+      console.error("Search cache read error:", cacheError.message);
+    }
+
+    // 8. Fetch users and total count
+    const [users, totalUsers] = await Promise.all([
+      User.find(filter)
+        .select("name profileImage bio")
+        .sort({ name: 1, _id: 1 })
+        .skip(skip)
+        .limit(pageLimit)
+        .lean(),
+
+      User.countDocuments(filter),
+    ]);
+
+    // 9. Pagination metadata
+    const totalPages = Math.ceil(totalUsers / pageLimit);
+
+    const responseData = {
+      users,
+      pagination: {
+        currentPage,
+        pageLimit,
+        totalUsers,
+        totalPages,
+        hasNextPage: currentPage < totalPages,
+        hasPrevPage: currentPage > 1 && totalUsers > 0,
+      },
+    };
+
+    // 10. Cache results (60 seconds)
+    try {
+      await setCache(cacheKey, responseData, 60);
+    } catch (cacheError) {
+      console.error("Search cache write error:", cacheError.message);
+    }
+
+    // 11. Return response
     return res
       .status(200)
-      .json(new ApiResponse(200, users, "Users retrieved successfully", true));
+      .json(
+        new ApiResponse(
+          200,
+          responseData,
+          users.length ? "Users retrieved successfully" : "No users found",
+          true
+        )
+      );
   } catch (error) {
     console.error("Search users error:", error);
 

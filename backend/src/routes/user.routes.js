@@ -13,6 +13,8 @@ import {
   getCurrentUser,
   changePassword,
   deleteMyAccount,
+  emailChangeSecurity,
+  verifyUpdateEmailOtp,
 } from "../controllers/user.auth.controller.js";
 import { validate } from "../middlewears/validatorsMddleware/validation.middleware.js";
 import { registerSchema } from "../validations/user.validation.js";
@@ -25,15 +27,8 @@ import upload from "../middlewears/multer/upload.js";
 import { protectLoginBruteForce } from "../middlewares/protectLoginBruteForce.js";
 import { cacheInvalidationAudit } from "../controllers/cacheInvalidationAudit.controller.js";
 
-
-
-import {
-  emailChangeSecurity,
-  verifyEmailChangeOTP,
-} from "../controllers/user/emailChange.controller.js";
-
 import { emailChangeRateLimit } from "../middlewares/rateLimit.middleware.js"; // * pending work making rate limiting for this request-----------------------------------------
-
+import {apiLimiter} from "../middlewears/rate-limiter-flexible-middlewear/apiLimiter.js"
 
 const router = Router();
 
@@ -67,7 +62,7 @@ router
 
 router
   .route("/email/change/verify")
-  .post(verifyJWT, emailChangeRateLimit, verifyEmailChangeOTP);
+  .post(verifyJWT, emailChangeRateLimit, verifyUpdateEmailOtp);
 
 router.get(
   "/cache-invalidation-audit",
@@ -75,6 +70,15 @@ router.get(
   authorizeRoles("ADMIN"),
   cacheInvalidationAudit
 );
+
+// Search users
+router.get(
+  "/search",
+  verifyJWT,
+  apiLimiter,
+  searchUser
+);
+
 
 
 
