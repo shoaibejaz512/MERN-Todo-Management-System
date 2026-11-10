@@ -15,6 +15,7 @@ import {
   deleteMyAccount,
   emailChangeSecurity,
   verifyUpdateEmailOtp,
+  generateEmailVerificationOtp,
 } from "../controllers/user.auth.controller.js";
 import { validate } from "../middlewears/validatorsMddleware/validation.middleware.js";
 import { registerSchema } from "../validations/user.validation.js";
@@ -77,6 +78,15 @@ router.get(
   verifyJWT,
   apiLimiter,
   searchUser
+);
+
+
+// Generate email verification OTP
+router.post(
+  "/email/verification/otp",
+  verifyAccessToken,
+  otpRateLimiter,
+  generateEmailVerificationOtp
 );
 
 

@@ -25,3 +25,28 @@ export const deleteManyCache = async (keys) => { // deleteManyCache function rem
 
   await redisClient.del(...keys);
 };
+
+
+
+
+// Store only if the key does not already exist.
+export const setCacheIfNotExists = async (key, value, ttl) => {
+  const result = await redisClient.set(key, value, "EX", ttl, "NX");
+
+  return result === "OK";
+};
+
+// Delete only if the stored value matches.
+// Prevents deleting another request's newly generated OTP.
+export const deleteCacheIfValueMatches = async (key, expectedValue) => {
+  const script = `
+    if redis.call("GET", KEYS[1]) == ARGV[1] then
+      return redis.call("DEL", KEYS[1])
+    end
+
+    return 0
+  `;
+
+  return redisClient.eval(script, 1, key, expectedValue);
+};
+

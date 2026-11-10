@@ -49,6 +49,11 @@ import { userKey } from "../utils/cacheKeys.js";
 import logger from "../loggers/index.js";
 import { escapeRegex } from "../utils/escaperegex.js";
 
+import {
+  setCacheIfNotExists,
+  deleteCacheIfValueMatches,
+} from "../service/redis/redis.service.js";
+
 const registerUser = async (req, res) => {
   //get all the values
   const { name, email, password, bio } = req.body;
@@ -1543,21 +1548,26 @@ const searchUser = async (req, res) => {
 
 //save otp inside redis not db
 
+
 const generateEmailVerificationOtp = async (req, res) => {
   let cacheKey;
+  let hashedOtp;
+  const OTP_TTL = 300; // 5 minutes
 
   try {
-    // STEP 1: Validate user ID
-    const { id } = req.params;
+    // STEP 1: Get authenticated user ID from JWT middleware
+    const userId = req.user?.userId;
 
-    if (!mongoose.Types.ObjectId.isValid(id)) {
+    if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
       return res
-        .status(400)
-        .json(new ApiResponse(400, null, "Invalid user ID", false));
+        .status(401)
+        .json(new ApiResponse(401, null, "Unauthorized request", false));
     }
 
     // STEP 2: Find user
-    const user = await User.findById(id).select("_id email isVerified");
+    const user = await User.findById(userId)
+      .select("_id email isVerified")
+      .lean();
 
     if (!user) {
       return res
@@ -1572,46 +1582,11 @@ const generateEmailVerificationOtp = async (req, res) => {
         .json(new ApiResponse(409, null, "Email is already verified", false));
     }
 
-    // STEP 4: Define Redis keys
-    cacheKey = emailVerificationOtpKey(id);
-    const cooldownKey = `email:verification:cooldown:${id}`;
+    // STEP 4: Check OTP hashing secret
+    const pepper = process.env.EMAIL_OTP_PEPPER;
 
-    // STEP 5: Prevent repeated OTP requests
-    const existingOtp = await getCache(cacheKey);
-
-    if (existingOtp) {
-      return res
-        .status(429)
-        .json(
-          new ApiResponse(
-            429,
-            null,
-            "OTP already sent. Please wait before requesting another OTP.",
-            false
-          )
-        );
-    }
-
-    // STEP 6: Generate a secure six-digit OTP
-    const otp = crypto.randomInt(100000, 1000000).toString();
-
-    // STEP 7: Hash OTP before storing it in Redis
-    const hashedOtp = await bcrypt.hash(otp, 10);
-
-    // STEP 8: Store OTP with a five-minute expiration
-    await setCache(cacheKey, hashedOtp, 300);
-
-    // STEP 9: Send verification email
-    try {
-      await sendEmail({
-        to: user.email,
-        subject: "Verify your FlowDo email",
-        text: `Your FlowDo verification OTP is ${otp}. It expires in 5 minutes.`,
-      });
-    } catch (emailError) {
-      await deleteCache(cacheKey);
-
-      console.error("Email verification delivery failed:", emailError.message);
+    if (!pepper || pepper.length < 32) {
+      logger.error("EMAIL_OTP_PEPPER is missing or too short");
 
       return res
         .status(500)
@@ -1619,26 +1594,95 @@ const generateEmailVerificationOtp = async (req, res) => {
           new ApiResponse(
             500,
             null,
-            "Unable to send verification email. Please try again later.",
+            "Unable to process verification request",
             false
           )
         );
     }
 
-    // STEP 10: Return success response
+    // STEP 5: Generate Redis key
+    cacheKey = emailVerificationOtpKey(userId);
+
+    // STEP 6: Generate cryptographically secure OTP
+    const otp = crypto.randomInt(100000, 1000000).toString();
+
+    // STEP 7: Hash OTP using HMAC-SHA256
+    hashedOtp = crypto.createHmac("sha256", pepper).update(otp).digest("hex");
+
+    // STEP 8: Atomically store OTP
+    // Redis SET key value EX 300 NX
+    // NX prevents concurrent requests from overwriting OTP.
+    const stored = await setCacheIfNotExists(cacheKey, hashedOtp, OTP_TTL);
+
+    if (!stored) {
+      return res
+        .status(429)
+        .json(
+          new ApiResponse(
+            429,
+            null,
+            "Verification OTP already sent. Please try again later.",
+            false
+          )
+        );
+    }
+
+    // STEP 9: Deliver verification email
+    try {
+      await sendEmail({
+        to: user.email,
+        subject: "Verify your FlowDo email",
+        text: `Your FlowDo verification OTP is ${otp}. It expires in 5 minutes. Do not share this code with anyone.`,
+      });
+    } catch (emailError) {
+      // Delete only if this request's OTP is still stored.
+      await deleteCacheIfValueMatches(cacheKey, hashedOtp);
+
+      logger.error(
+        {
+          err: emailError,
+          userId,
+        },
+        "Email verification delivery failed"
+      );
+
+      return res
+        .status(502)
+        .json(
+          new ApiResponse(
+            502,
+            null,
+            "Unable to deliver verification email. Please try again later.",
+            false
+          )
+        );
+    }
+
+    // STEP 10: Success response
+    logger.info({ userId }, "Email verification OTP generated and delivered");
+
     return res
       .status(200)
       .json(
         new ApiResponse(200, null, "Verification OTP sent successfully", true)
       );
   } catch (error) {
-    console.error("Generate email verification OTP failed:", error.message);
+    logger.error(
+      {
+        err: error,
+        userId: req.user?.userId,
+      },
+      "Generate email verification OTP failed"
+    );
 
     return res
       .status(500)
       .json(new ApiResponse(500, null, "Internal server error", false));
   }
 };
+
+
+
 const verifyEmail = async (req, res) => {
   const session = await mongoose.startSession();
 
