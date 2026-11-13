@@ -17,6 +17,7 @@ import {
   verifyUpdateEmailOtp,
   generateEmailVerificationOtp,
   verifyEmail,
+  generateUpdateEmailOtp,
 } from "../controllers/user.auth.controller.js";
 import { validate } from "../middlewears/validatorsMddleware/validation.middleware.js";
 import { registerSchema } from "../validations/user.validation.js";
@@ -32,6 +33,8 @@ import { cacheInvalidationAudit } from "../controllers/cacheInvalidationAudit.co
 import { emailChangeRateLimit } from "../middlewares/rateLimit.middleware.js"; // * pending work making rate limiting for this request-----------------------------------------
 import {apiLimiter} from "../middlewears/rate-limiter-flexible-middlewear/apiLimiter.js"
 import { emailVerificationLimiter } from "../middlewears/rate-limiter-flexible-middlewear/verifyemailLimiter.js";
+import { updateEmailOtpLimiter } from "../middlewears/rate-limiter-flexible-middlewear/updateemaillimiter.js";
+import { requireRecentAuth } from "../middlewears/requireRecentAuth.js";
 
 const router = Router();
 
@@ -99,7 +102,13 @@ router.post(
   verifyEmail
 );
 
-
+router.post(
+  "/me/update-email/send-otp",
+  verifyAccessToken,
+  requireRecentAuth,
+  updateEmailOtpLimiter,
+  generateUpdateEmailOtp
+);
 
 
 // TODO: PENDING AFTER COMPLETING THSI ROUTES ONLY MFA/2FA FEATURE IMPLEMENTED
