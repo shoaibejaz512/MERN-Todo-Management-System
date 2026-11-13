@@ -1,4 +1,5 @@
 import { bgGreen, green, red, redBright } from "colorette";
+import redisClient from "../config/redis.config.js";
 import {
   sendPasswordResetOtp,
   sendUpdateEmailOtp,
@@ -21,7 +22,7 @@ import {
   verifyRefreshToken,
   hashRefreshToken,
 } from "../utils/token.utils.js";
-import {REFRESH_TOKEN_TTL_MS} from "../constants.js";
+import { REFRESH_TOKEN_TTL_MS } from "../constants.js";
 import {
   getCache,
   setCache,
@@ -147,7 +148,6 @@ const recordFailedLogin = async (req, userId = null) => {
 // LOGIN USER
 // ==========================================================
 
-
 const loginUser = async (req, res) => {
   let mongoSession;
 
@@ -164,12 +164,7 @@ const loginUser = async (req, res) => {
       return res
         .status(400)
         .json(
-          new ApiResponse(
-            400,
-            null,
-            "Email and password are required",
-            false
-          )
+          new ApiResponse(400, null, "Email and password are required", false)
         );
     }
 
@@ -188,20 +183,12 @@ const loginUser = async (req, res) => {
       return res
         .status(401)
         .json(
-          new ApiResponse(
-            401,
-            null,
-            "Email or password is incorrect",
-            false
-          )
+          new ApiResponse(401, null, "Email or password is incorrect", false)
         );
     }
 
     // 4. Verify password.
-    const isPasswordCorrect = await bcrypt.compare(
-      password,
-      user.password
-    );
+    const isPasswordCorrect = await bcrypt.compare(password, user.password);
 
     if (!isPasswordCorrect) {
       await recordFailedLogin(req, user._id);
@@ -209,12 +196,7 @@ const loginUser = async (req, res) => {
       return res
         .status(401)
         .json(
-          new ApiResponse(
-            401,
-            null,
-            "Email or password is incorrect",
-            false
-          )
+          new ApiResponse(401, null, "Email or password is incorrect", false)
         );
     }
 
@@ -222,14 +204,7 @@ const loginUser = async (req, res) => {
     if (!mongoose.isValidObjectId(user._id)) {
       return res
         .status(500)
-        .json(
-          new ApiResponse(
-            500,
-            null,
-            "Unable to process login",
-            false
-          )
-        );
+        .json(new ApiResponse(500, null, "Unable to process login", false));
     }
 
     // 6. Prepare session and request metadata.
@@ -237,12 +212,9 @@ const loginUser = async (req, res) => {
     const sessionId = new mongoose.Types.ObjectId();
 
     const ipAddress = req.ip || null;
-    const userAgent =
-      req.get("user-agent")?.slice(0, 512) || null;
+    const userAgent = req.get("user-agent")?.slice(0, 512) || null;
 
-    const expiresAt = new Date(
-      now.getTime() + REFRESH_TOKEN_TTL_MS
-    );
+    const expiresAt = new Date(now.getTime() + REFRESH_TOKEN_TTL_MS);
 
     // 7. Generate tokens bound to this session.
     const accessToken = signAccessToken(user, sessionId);
@@ -263,14 +235,7 @@ const loginUser = async (req, res) => {
     if (!loggedInUser) {
       return res
         .status(401)
-        .json(
-          new ApiResponse(
-            401,
-            null,
-            "Unable to authenticate user",
-            false
-          )
-        );
+        .json(new ApiResponse(401, null, "Unable to authenticate user", false));
     }
 
     // 10. Atomically persist the session and its audit event.
@@ -333,28 +298,14 @@ const loginUser = async (req, res) => {
     // 13. Return the safe user object.
     return res
       .status(200)
-      .json(
-        new ApiResponse(
-          200,
-          loggedInUser,
-          "User login successful",
-          true
-        )
-      );
+      .json(new ApiResponse(200, loggedInUser, "User login successful", true));
   } catch (error) {
     // Log operational details only in server-side monitoring.
     console.error("Login operation failed.");
 
     return res
       .status(500)
-      .json(
-        new ApiResponse(
-          500,
-          null,
-          "Login failed",
-          false
-        )
-      );
+      .json(new ApiResponse(500, null, "Login failed", false));
   } finally {
     if (mongoSession) {
       await mongoSession.endSession();
@@ -774,8 +725,7 @@ const changePassword = async (req, res) => {
   }
 };
 
-
-// TODO:SEPRATE THE CODE OF THIS CONTROLLER IN GOO WAY 
+// TODO:SEPRATE THE CODE OF THIS CONTROLLER IN GOO WAY
 
 const ACCESS_SECRET = process.env.JWT_ACCESS_SECRET;
 const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET;
@@ -784,10 +734,8 @@ if (!ACCESS_SECRET || !REFRESH_SECRET) {
   throw new Error("JWT secrets must be configured");
 }
 
-
 const hashToken = (token) =>
   crypto.createHash("sha256").update(token, "utf8").digest("hex");
-
 
 const hashesMatch = (incomingHash, storedHash) => {
   if (typeof storedHash !== "string" || !/^[a-f0-9]{64}$/i.test(storedHash)) {
@@ -821,7 +769,6 @@ const logSuspiciousRefresh = ({ userId, sessionId, req }) => {
     })
   );
 };
-
 
 const refreshAccessToken = async (req, res) => {
   const incomingToken = req.cookies?.refreshToken;
@@ -1548,7 +1495,6 @@ const searchUser = async (req, res) => {
 
 //save otp inside redis not db
 
-
 const generateEmailVerificationOtp = async (req, res) => {
   let cacheKey;
   let hashedOtp;
@@ -1607,12 +1553,21 @@ const generateEmailVerificationOtp = async (req, res) => {
     const otp = crypto.randomInt(100000, 1000000).toString();
 
     // STEP 7: Hash OTP using HMAC-SHA256
-    hashedOtp = crypto.createHmac("sha256", pepper).update(otp).digest("hex");
+    hashedOtp = crypto.createHash("sha256").update(otp).digest("hex");
+
+    const cacheValue = JSON.stringify({
+      otpHash,
+      email: user.email.trim().toLowerCase(),
+    });
 
     // STEP 8: Atomically store OTP
     // Redis SET key value EX 300 NX
     // NX prevents concurrent requests from overwriting OTP.
-    const stored = await setCacheIfNotExists(cacheKey, hashedOtp, OTP_TTL);
+    const stored = await setCache(
+      emailVerificationOtpKey(user._id),
+      cacheValue,
+      OTP_TTL
+    );
 
     if (!stored) {
       return res
@@ -1681,32 +1636,64 @@ const generateEmailVerificationOtp = async (req, res) => {
   }
 };
 
+// Keep lock duration longer than the expected transaction duration.
+const EMAIL_VERIFY_LOCK_TTL = 60;
 
+// OTP comparison and lock release scripts.
+const RELEASE_LOCK_SCRIPT = `
+  if redis.call("GET", KEYS[1]) == ARGV[1] then
+    return redis.call("DEL", KEYS[1])
+  end
+
+  return 0
+`;
 
 const verifyEmail = async (req, res) => {
-  const session = await mongoose.startSession();
+  const { userId } = req.user;
+  const { otp } = req.body;
+
+  const cacheKey = emailVerificationOtpKey(userId);
+  const lockKey = `email:verify:lock:${userId}`;
+
+  let lockToken;
+  let session;
+  let user;
+  let notification;
 
   try {
-    const { id } = req.params;
-    const { otp } = req.body;
+    // ============================================
+    // STEP 1: ACQUIRE DISTRIBUTED REDIS LOCK
+    // ============================================
 
-    if (!mongoose.Types.ObjectId.isValid(id)) {
-      return res
-        .status(400)
-        .json(new ApiResponse(400, null, "Invalid user id", false));
-    }
+    lockToken = crypto.randomUUID();
 
-    if (!otp || !/^\d{6}$/.test(otp)) {
+    const lockAcquired = await redisClient.set(
+      lockKey,
+      lockToken,
+      "EX",
+      EMAIL_VERIFY_LOCK_TTL,
+      "NX"
+    );
+
+    if (lockAcquired !== "OK") {
+      lockToken = null;
+
       return res
-        .status(400)
+        .status(409)
         .json(
-          new ApiResponse(400, null, "OTP must be a valid 6-digit code", false)
+          new ApiResponse(
+            409,
+            null,
+            "Email verification is already in progress",
+            false
+          )
         );
     }
 
-    const cacheKey = emailVerificationOtpKey(id);
+    // ============================================
+    // STEP 2: GET OTP FROM REDIS
+    // ============================================
 
-    // Get OTP from Redis
     const storedOtp = await getCache(cacheKey);
 
     if (!storedOtp) {
@@ -1722,60 +1709,238 @@ const verifyEmail = async (req, res) => {
         );
     }
 
-    // Compare OTP
-    const hashedOtp = crypto.createHash("sha256").update(otp).digest("hex");
+    // ============================================
+    // STEP 3: PARSE OTP DATA
+    // ============================================
 
-    if (hashedOtp !== storedOtp) {
+    let otpData;
+
+    try {
+      otpData =
+        typeof storedOtp === "string" ? JSON.parse(storedOtp) : storedOtp;
+    } catch {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Invalid or expired verification OTP",
+            false
+          )
+        );
+    }
+
+    if (
+      !otpData ||
+      typeof otpData.otpHash !== "string" ||
+      typeof otpData.email !== "string"
+    ) {
+      return res
+        .status(400)
+        .json(
+          new ApiResponse(
+            400,
+            null,
+            "Invalid or expired verification OTP",
+            false
+          )
+        );
+    }
+
+    // Validate SHA-256 hex digest format.
+    if (!/^[a-f0-9]{64}$/i.test(otpData.otpHash)) {
       return res
         .status(400)
         .json(new ApiResponse(400, null, "Invalid verification OTP", false));
     }
 
-    let user;
-    let notification;
+    // ============================================
+    // STEP 4: FIND AUTHENTICATED USER
+    // ============================================
 
-    await session.withTransaction(async () => {
-      user = await User.findById(id)
-        .select("name profileImage bio isVerified")
-        .session(session);
+    const existingUser = await User.findById(userId)
+      .select("name email isVerified")
+      .lean();
 
-      if (!user) {
-        const error = new Error("User not found");
-        error.statusCode = 404;
-        throw error;
+    if (!existingUser) {
+      return res
+        .status(404)
+        .json(new ApiResponse(404, null, "User not found", false));
+    }
+
+    if (existingUser.isVerified) {
+      return res
+        .status(409)
+        .json(new ApiResponse(409, null, "Email is already verified", false));
+    }
+
+    // ============================================
+    // STEP 5: VERIFY OTP EMAIL OWNERSHIP
+    // ============================================
+
+    const normalizedStoredEmail = otpData.email.trim().toLowerCase();
+
+    const normalizedUserEmail = existingUser.email?.trim().toLowerCase();
+
+    if (!normalizedUserEmail || normalizedStoredEmail !== normalizedUserEmail) {
+      return res
+        .status(409)
+        .json(
+          new ApiResponse(
+            409,
+            null,
+            "Email address has changed. Generate a new OTP.",
+            false
+          )
+        );
+    }
+
+    // ============================================
+    // STEP 6: TIMING-SAFE OTP COMPARISON
+    // ============================================
+
+    const submittedOtpHash = crypto
+      .createHash("sha256")
+      .update(otp, "utf8")
+      .digest();
+
+    const storedOtpHash = Buffer.from(otpData.otpHash, "hex");
+
+    if (
+      submittedOtpHash.length !== storedOtpHash.length ||
+      !crypto.timingSafeEqual(submittedOtpHash, storedOtpHash)
+    ) {
+      return res
+        .status(400)
+        .json(new ApiResponse(400, null, "Invalid verification OTP", false));
+    }
+
+    // ============================================
+    // STEP 7: START MONGODB TRANSACTION
+    // ============================================
+
+    session = await mongoose.startSession();
+
+    await session.withTransaction(
+      async () => {
+        // Always read fresh user data inside transaction.
+        user = await User.findById(userId)
+          .select("name email profileImage bio isVerified")
+          .session(session);
+
+        if (!user) {
+          const error = new Error("User not found");
+          error.statusCode = 404;
+          throw error;
+        }
+
+        if (user.isVerified) {
+          const error = new Error("Email is already verified");
+          error.statusCode = 409;
+          throw error;
+        }
+
+        // Prevent verification if email changed.
+        if (user.email?.trim().toLowerCase() !== normalizedStoredEmail) {
+          const error = new Error(
+            "Email address has changed. Generate a new OTP."
+          );
+
+          error.statusCode = 409;
+          throw error;
+        }
+
+        // ========================================
+        // STEP 8: UPDATE USER VERIFICATION STATUS
+        // ========================================
+
+        user.isVerified = true;
+
+        await user.save({ session });
+
+        // ========================================
+        // STEP 9: CREATE NOTIFICATION
+        // ========================================
+
+        [notification] = await Notification.create(
+          [
+            {
+              user: user._id,
+              sender: user._id,
+              type: "EMAIL_VERIFIED",
+              title: "Email Verified",
+              message: `${user.name}, your email has been verified.`,
+            },
+          ],
+          { session }
+        );
+      },
+      {
+        readConcern: { level: "snapshot" },
+        writeConcern: { w: "majority" },
+        readPreference: "primary",
+        maxCommitTimeMS: 10000,
       }
+    );
 
-      if (user.isVerified) {
-        const error = new Error("Email is already verified");
-        error.statusCode = 409;
-        throw error;
-      }
+    // ============================================
+    // STEP 10: DELETE OTP AFTER COMMIT
+    // ============================================
 
-      // Verify email
-      user.isVerified = true;
-
-      await user.save({ session });
-
-      // Create notification
-      [notification] = await Notification.create(
-        [
-          {
-            user: user._id,
-            sender: user._id,
-            type: "EMAIL_VERIFIED",
-            title: "Email Verified",
-            message: `${user.name}, your email has been verified.`,
-          },
-        ],
-        { session }
+    try {
+      await deleteCache(cacheKey);
+    } catch (cacheError) {
+      // Do not reverse successful MongoDB transaction.
+      console.error(
+        "OTP deletion failed after verification:",
+        cacheError.message
       );
-    });
+    }
 
-    // Delete OTP only after successful MongoDB transaction
-    await deleteCache(cacheKey);
+    // ============================================
+    // STEP 11: INVALIDATE USER PROFILE CACHE
+    // ============================================
 
-    // Emit only after transaction succeeds
-    io.to(`user:${id}`).emit("notification", notification);
+    try {
+      // STEP 10: Invalidate user profile cache
+      const cacheInvalidation = await invalidateCacheWithAudit({
+        keys: [`user:profile:${userId}`],
+        event: "USER_EMAIL_VERIFIED",
+        entityType: "USER",
+        entityId: userId,
+        actorId: userId,
+      });
+
+      if (!cacheInvalidation.success) {
+        console.error("User profile cache invalidation failed", {
+          userId,
+          event: "USER_EMAIL_VERIFIED",
+        });
+      }
+    } catch (cacheError) {
+      console.error(
+        "User profile cache invalidation failed:",
+        cacheError.message
+      );
+    }
+
+    // ============================================
+    // STEP 12: EMIT SOCKET NOTIFICATION
+    // ============================================
+
+    try {
+      io.to(`user:${userId}`).emit("notification", notification);
+    } catch (socketError) {
+      console.error(
+        "Socket notification emission failed:",
+        socketError.message
+      );
+    }
+
+    // ============================================
+    // STEP 13: SUCCESS RESPONSE
+    // ============================================
 
     return res.status(200).json(
       new ApiResponse(
@@ -1792,9 +1957,11 @@ const verifyEmail = async (req, res) => {
       )
     );
   } catch (error) {
-    console.error(`Email verification failed: ${error.message}`);
+    console.error("Email verification failed:", error.message);
 
-    const statusCode = error.statusCode || 500;
+    const statusCode = [404, 409].includes(error.statusCode)
+      ? error.statusCode
+      : 500;
 
     return res
       .status(statusCode)
@@ -1802,14 +1969,40 @@ const verifyEmail = async (req, res) => {
         new ApiResponse(
           statusCode,
           null,
-          error.message || "Internal server error",
+          statusCode === 500 ? "Internal server error" : error.message,
           false
         )
       );
   } finally {
-    await session.endSession();
+    // ============================================
+    // STEP 14: CLOSE MONGODB SESSION
+    // ============================================
+
+    if (session) {
+      try {
+        await session.endSession();
+      } catch (sessionError) {
+        console.error("MongoDB session cleanup failed:", sessionError.message);
+      }
+    }
+
+    // ============================================
+    // STEP 15: RELEASE REDIS DISTRIBUTED LOCK
+    // ============================================
+
+    if (lockToken) {
+      try {
+        await redis.eval(RELEASE_LOCK_SCRIPT, 1, lockKey, lockToken);
+      } catch (lockError) {
+        console.error(
+          "Redis verification lock release failed:",
+          lockError.message
+        );
+      }
+    }
   }
 };
+
 // ============================================================
 // Generate OTP for Email Update
 // ============================================================

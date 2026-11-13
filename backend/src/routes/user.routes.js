@@ -16,11 +16,12 @@ import {
   emailChangeSecurity,
   verifyUpdateEmailOtp,
   generateEmailVerificationOtp,
+  verifyEmail,
 } from "../controllers/user.auth.controller.js";
 import { validate } from "../middlewears/validatorsMddleware/validation.middleware.js";
 import { registerSchema } from "../validations/user.validation.js";
 import { verifyJWT } from "../middlewears/auth/use.auth.middleware.js";
-import { verifyOtpSchema } from "../validations/otp.validate.js";
+import { verifyEmailSchema, verifyOtpSchema } from "../validations/otp.validate.js";
 import { otpRateLimiter } from "../middlewears/rate-limiter-flexible-middlewear/otpRateLimter.js";
 import { loginRateLimit } from "../middlewears/rate-limiter-flexible-middlewear/loginRatelimiter.js";
 import { registerRateLimit } from "../middlewears/rate-limiter-flexible-middlewear/registerRateLimiter.js";
@@ -30,6 +31,7 @@ import { cacheInvalidationAudit } from "../controllers/cacheInvalidationAudit.co
 
 import { emailChangeRateLimit } from "../middlewares/rateLimit.middleware.js"; // * pending work making rate limiting for this request-----------------------------------------
 import {apiLimiter} from "../middlewears/rate-limiter-flexible-middlewear/apiLimiter.js"
+import { emailVerificationLimiter } from "../middlewears/rate-limiter-flexible-middlewear/verifyemailLimiter.js";
 
 const router = Router();
 
@@ -87,6 +89,14 @@ router.post(
   verifyAccessToken,
   otpRateLimiter,
   generateEmailVerificationOtp
+);
+
+router.post(
+  "/me/verify-email",
+  verifyAccessToken,
+  emailVerificationLimiter,
+  validate(verifyEmailSchema),
+  verifyEmail
 );
 
 
