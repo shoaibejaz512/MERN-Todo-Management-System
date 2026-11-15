@@ -2482,8 +2482,12 @@ const getUserStats = async (req, res) => {
     // 2. Check Redis
     // ----------------------------------------------------------
 
-    const cachedStats = await getCache(cacheKey);
-
+    const cachedStats = null;
+    try {
+      cachedStats = await getCache(cacheKey);
+    } catch (error) {
+      logger.error({ error, userId }, "Redis cache read failed");
+    }
     if (cachedStats) {
       return res
         .status(200)

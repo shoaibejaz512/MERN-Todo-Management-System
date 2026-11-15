@@ -18,6 +18,7 @@ import {
   generateEmailVerificationOtp,
   verifyEmail,
   generateUpdateEmailOtp,
+  getUserStats,
 } from "../controllers/user.auth.controller.js";
 import { validate } from "../middlewears/validatorsMddleware/validation.middleware.js";
 import { registerSchema } from "../validations/user.validation.js";
@@ -109,6 +110,8 @@ router.post(
   updateEmailOtpLimiter,
   generateUpdateEmailOtp
 );
+
+router.get("/stats", verifyJWT, authorizeRoles("ADMIN"),apiLimiter, getUserStats);
 
 
 // TODO: PENDING AFTER COMPLETING THSI ROUTES ONLY MFA/2FA FEATURE IMPLEMENTED
