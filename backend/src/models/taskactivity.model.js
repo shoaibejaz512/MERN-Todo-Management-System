@@ -80,10 +80,14 @@ const taskActivitySchema = new mongoose.Schema(
     timestamps: true,
   }
 );
-
-// Latest activities first
 taskActivitySchema.index({
   todo: 1,
+  createdAt: -1,
+});
+
+taskActivitySchema.index({
+  todo: 1,
+  type: 1,
   createdAt: -1,
 });
 

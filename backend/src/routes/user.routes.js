@@ -19,6 +19,7 @@ import {
   verifyEmail,
   generateUpdateEmailOtp,
   getUserStats,
+  getUserActivity,
 } from "../controllers/user.auth.controller.js";
 import { validate } from "../middlewears/validatorsMddleware/validation.middleware.js";
 import { registerSchema } from "../validations/user.validation.js";
@@ -113,6 +114,13 @@ router.post(
 
 router.get("/stats", verifyJWT, authorizeRoles("ADMIN"),apiLimiter, getUserStats);
 
+router.get(
+  "/activity",
+  verifyJWT,
+  authorizeRoles("ADMIN"),
+  apiLimiter,
+  getUserActivity
+);
 
 // TODO: PENDING AFTER COMPLETING THSI ROUTES ONLY MFA/2FA FEATURE IMPLEMENTED
 
