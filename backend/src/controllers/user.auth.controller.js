@@ -54,6 +54,7 @@ import {
   setCacheIfNotExists,
   deleteCacheIfValueMatches,
 } from "../service/redis/redis.service.js";
+import { welcome_email_queue } from "../queues/welcome-email.queue.js";
 
 const registerUser = async (req, res) => {
   //get all the values
@@ -104,8 +105,8 @@ const registerUser = async (req, res) => {
     //set tokens to cookie
     setAuthCookies(res, access_token, refres_token);
 
-    //send welcome email
-    sendWelcomeEmail(user);
+    //push into email queue
+    welcome_email_queue.push(user);
 
     //send successfull response to the user ✅✅
     console.log(green("User created successfully"));
@@ -3915,8 +3916,8 @@ export {
   sessionRevocation,
   emailChangeSecurity,
   cacheInvalidationAudit,
-  accountDeletionReAuthentication,
-  exportUserData,
+  // accountDeletionReAuthentication,
+  // exportUserData,
   securityEvents,
   restoreMyAccount,
 };

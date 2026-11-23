@@ -20,6 +20,14 @@ import {
   generateUpdateEmailOtp,
   getUserStats,
   getUserActivity,
+  getUserNotifications,
+  getUserSessions,
+  markNotificationAsRead,
+  markAllNotificationsAsRead,
+  resendEmailVerificationOTP,
+  sessionRevocation,
+  restoreMyAccount,
+  securityEvents,
 } from "../controllers/user.auth.controller.js";
 import { validate } from "../middlewears/validatorsMddleware/validation.middleware.js";
 import { registerSchema } from "../validations/user.validation.js";
@@ -107,6 +115,7 @@ router.post(
 router.post(
   "/me/update-email/send-otp",
   verifyAccessToken,
+  otpRateLimiter,
   requireRecentAuth,
   updateEmailOtpLimiter,
   generateUpdateEmailOtp
@@ -120,6 +129,50 @@ router.get(
   authorizeRoles("ADMIN"),
   apiLimiter,
   getUserActivity
+);
+
+router.get("/notifications", verifyJWT, apiLimiter, getUserNotifications);
+
+router.get("/session",verifyJWT,apiLimiter,getUserSessions);
+
+
+router.patch("/:notificationId/read", verifyJWT, markNotificationAsRead);
+
+// Mark all notifications as read
+router.patch(
+  "/read-all",
+  verifyJWT,
+  markAllNotificationsAsRead
+);
+
+router.post(
+  "/me/email-verification/resend-otp",
+  verifyJWT,
+  otpRateLimiter,
+  resendEmailVerificationOTP,
+);
+
+
+// Revoke a specific user session
+router.delete(
+  "/me/sessions/:sessionId",
+  verifyJWT,
+  apiLimiter,
+  sessionRevocation
+);
+
+// Restore a soft-deleted user account
+router.post(
+  "/restore-account",
+  restoreMyAccount
+);
+
+// Get authenticated user's security events
+router.get(
+  "/me/security-events",
+  apiLimiter,
+  verifyJWT,
+  securityEvents
 );
 
 // TODO: PENDING AFTER COMPLETING THSI ROUTES ONLY MFA/2FA FEATURE IMPLEMENTED
@@ -162,7 +215,5 @@ router.get(
 //   validateTotpBody,
 //   regenerateRecoveryCodes
 // );
-
-
 
 export default router;
